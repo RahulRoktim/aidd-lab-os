@@ -226,7 +226,6 @@ def execute_docking_job(job_id: str, request: DockingJobRequest) -> Tuple[List[D
             f"energy_range = {request.energy_range or 3.0}",
             f"seed = {request.seed or 42}",
             f"out = {out_pdbqt_path}",
-            f"log = {log_path}"
         ]
         config_text = "\n".join(config_lines) + "\n"
         config_path = os.path.join(job_dir, f"{lig_id}_config.txt")

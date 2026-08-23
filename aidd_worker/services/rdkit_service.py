@@ -43,7 +43,7 @@ DIVERSE_50_MOLECULES = [
     {"id": "CHEM-22", "name": "Benzofuran", "smiles": "c1ccc2occc2c1", "class": "Fused Benzofuran"},
     {"id": "CHEM-23", "name": "Quinoline", "smiles": "c1ccc2ncccc2c1", "class": "Fused Quinoline"},
     {"id": "CHEM-24", "name": "Isoquinoline", "smiles": "c1ccc2cnccc2c1", "class": "Fused Isoquinoline"},
-    {"id": "CHEM-25", "name": "Purine Core", "smiles": "c1nc2[nH]cnc2n1", "class": "Fused Purine"},
+    {"id": "CHEM-25", "name": "Purine Core", "smiles": "c1ncnc2[nH]cnc12", "class": "Fused Purine"},
     
     # 5. Amines (Aliphatic 1°, 2°, 3°, Cyclic)
     {"id": "CHEM-26", "name": "Methylamine", "smiles": "CN", "class": "Primary Amine"},

@@ -248,7 +248,7 @@ CREATE TABLE IF NOT EXISTS candidate_scores (
         metrics_json TEXT,
         stdout TEXT,
         stderr TEXT,
-        exit_code INTEGER DEFAULT 0,
+        exit_code INTEGER DEFAULT NULL,
         output_artifacts_json TEXT,
         failure_reason TEXT,
         created_at TEXT NOT NULL,
