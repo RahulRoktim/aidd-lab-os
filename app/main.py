@@ -85,6 +85,8 @@ class DockingRequest(BaseModel):
     docking_tool: Optional[str] = "AutoDock Vina"
     tool_version: Optional[str] = "1.2.5"
     receptor: Optional[str] = "EGFR Kinase Domain (PDB: 1M17 / 4WKQ)"
+    receptor_pdbqt: Optional[str] = None
+    prepared_ligands: Optional[list] = None
     grid_center: Optional[str] = "x=22.0, y=0.5, z=52.8"
     grid_size: Optional[str] = "20 x 20 x 20 Å"
     center_x: Optional[float] = 22.0

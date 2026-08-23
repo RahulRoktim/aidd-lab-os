@@ -716,7 +716,65 @@ def import_or_run_docking(project_id: str,
                           seed: Optional[int] = 42,
                           result_origin: str = "IMPORTED",
                           custom_scores_csv: Optional[str] = None,
-                          notes: str = "") -> dict:
+                          notes: str = "",
+                          receptor_pdbqt: Optional[str] = None,
+                          prepared_ligands: Optional[list] = None) -> dict:
+
+    # 1) If NATIVE mode, explicitly require pdbqt assets
+    if result_origin == "COMPUTED":
+        from app.worker_client import worker_client
+        if not receptor_pdbqt or not prepared_ligands:
+            raise Exception("Native execution requires explicit receptor_pdbqt and prepared_ligands in the request.")
+
+        # Create job directly
+        new_job_id = str(uuid.uuid4())
+
+        # Build worker payload
+        worker_payload = {
+            "receptor_pdbqt": receptor_pdbqt,
+            "ligands": prepared_ligands,
+            "search_box": {
+                "center_x": center_x,
+                "center_y": center_y,
+                "center_z": center_z,
+                "size_x": size_x,
+                "size_y": size_y,
+                "size_z": size_z
+            },
+            "exhaustiveness": exhaustiveness,
+            "execution_mode": "NATIVE"
+        }
+
+        try:
+            worker_res = worker_client.submit_docking_job(worker_payload, timeout=60.0)
+            if worker_res.get("status") != "COMPLETED":
+                # FAILED state mapping
+                return {
+                    "experiment_id": new_job_id,
+                    "status": "failed",
+                    "exit_code": worker_res.get("exit_code", 1),
+                    "best_docking_score": 0.0,
+                    "metrics": {"result_origin": "COMPUTED", "error": "Worker docking failed."}
+                }
+
+            # Map results
+            return {
+                "experiment_id": new_job_id,
+                "status": "completed",
+                "exit_code": worker_res.get("exit_code", 0),
+                "best_docking_score": worker_res.get("results", [{}])[0].get("docking_score", 0),
+                "metrics": {"result_origin": "COMPUTED"}
+            }
+
+        except Exception as e:
+            return {
+                "experiment_id": new_job_id,
+                "status": "failed",
+                "exit_code": 1,
+                "best_docking_score": 0.0,
+                "metrics": {"result_origin": "COMPUTED", "error": str(e)}
+            }
+
     project = get_project(project_id)
     in_ds = get_dataset_detail(input_dataset_id)
     if not project or not in_ds:

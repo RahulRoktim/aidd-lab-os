@@ -182,6 +182,7 @@ def execute_docking_job(job_id: str, request: DockingJobRequest) -> Tuple[List[D
     start_time = time.time()
     total_stdout = []
     total_stderr = []
+    last_exit_code = 0
 
     for lig in request.ligands:
         lig_id = lig.get("id") or "LIG-001"
@@ -241,6 +242,7 @@ def execute_docking_job(job_id: str, request: DockingJobRequest) -> Tuple[List[D
                 proc = subprocess.run(cmd, capture_output=True, text=True, timeout=config.MAX_DOCKING_TIMEOUT_SECONDS)
                 stdout = proc.stdout
                 stderr = proc.stderr
+                last_exit_code = proc.returncode
                 total_stdout.append(f"[{lig_id} STDOUT]\n{stdout}")
                 if stderr:
                     total_stderr.append(f"[{lig_id} STDERR]\n{stderr}")
@@ -346,7 +348,8 @@ def execute_docking_job(job_id: str, request: DockingJobRequest) -> Tuple[List[D
         "duration_seconds": duration,
         "search_box": sb.dict(),
         "exhaustiveness": request.exhaustiveness or 16,
-        "seed": request.seed or 42
+        "seed": request.seed or 42,
+        "exit_code": last_exit_code
     }
 
     return results, failures, artifacts, meta

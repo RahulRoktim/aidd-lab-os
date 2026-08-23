@@ -353,15 +353,17 @@ class NativeValidationHarness:
         }
         self.report["vina_proof"] = vina_data
 
-        if is_native_vina:
-            self.log("VINA_PROOF", f"Native AutoDock Vina subprocess executed successfully. Best Affinity: {vina_data['best_affinity_kcal_mol']} kcal/mol ({vina_data['poses_count']} poses generated)", "PASS")
+
+        if is_native_vina and vina_data.get('exit_code') == 0:
+            self.log('VINA_PROOF', f"Native AutoDock Vina subprocess executed successfully. Best Affinity: {vina_data['best_affinity_kcal_mol']} kcal/mol ({vina_data['poses_count']} poses generated)", 'PASS')
             return True
         elif results:
-            self.log("VINA_PROOF", f"Executed via Vina test fixture/fallback. Score: {results[0].get('docking_score')} kcal/mol [Origin: {results[0].get('result_origin')}]", "INFO")
+            self.log('VINA_PROOF', f"Executed via Vina test fixture/fallback. Score: {results[0].get('docking_score')} kcal/mol [Origin: {results[0].get('result_origin')}]", 'INFO')
             return True
         else:
-            self.log("VINA_PROOF", f"Docking failed with {len(failures)} failure records", "FAIL")
+            self.log('VINA_PROOF', f"Docking failed with {len(failures)} failure records", 'FAIL')
             return False
+
 
     # -------------------------------------------------------------------------
     # STAGE 6: MAIN APPLICATION END-TO-END WORKFLOW
@@ -415,21 +417,52 @@ class NativeValidationHarness:
         ds2_id = std_res["output_dataset_id"]
         self.log("APP_E2E", f"Standardization experiment completed. Dataset snapshot: {std_res['output_dataset_label']}", "PASS")
 
+
         # 4. Docking Screen
+        rec_path = os.path.join(BASE_DIR, "benchmark_assets", "4wkq_receptor.pdbqt")
+        lig_path = os.path.join(BASE_DIR, "benchmark_assets", "erlotinib_ligand.pdbqt")
+        if not os.path.exists(rec_path) or not os.path.exists(lig_path):
+            self.log("APP_E2E", "Benchmark PDBQT assets missing from benchmark_assets/", "FAIL")
+            self.report["e2e_application_workflow"] = {"success": False}
+            return False
+
+        with open(rec_path, 'r', encoding='utf-8') as f:
+            rec_content = f.read()
+        with open(lig_path, 'r', encoding='utf-8') as f:
+            lig_content = f.read()
+
         dock_payload = {
             "input_dataset_id": ds2_id,
             "experiment_name": "AutoDock Vina Kinase Domain Screen",
             "receptor": "EGFR Kinase Domain (PDB: 4WKQ)",
             "grid_center": "x=22.4, y=0.8, z=52.5",
             "exhaustiveness": 8,
-            "result_origin": "COMPUTED"
+            "result_origin": "COMPUTED",
+            "receptor_pdbqt": rec_content,
+            "prepared_ligands": [{"id": "VAL-01", "name": "Osimertinib", "pdbqt": lig_content}]
         }
         succ, dock_res = http_post(f"{self.app_url}/api/projects/{proj_id}/experiments/docking", dock_payload, timeout=30.0)
         if not succ:
             self.log("APP_E2E", f"Docking experiment failed: {dock_res}", "FAIL")
+            self.report["e2e_application_workflow"] = {"success": False}
             return False
+
         dock_exp_id = dock_res["experiment_id"]
-        self.log("APP_E2E", f"Docking experiment completed (Exp ID: {dock_exp_id}). Best score: {dock_res.get('best_docking_score')} kcal/mol", "PASS")
+
+        # Verify it actually natively executed
+        succ, exp_detail = http_get(f"{self.app_url}/api/experiments/{dock_exp_id}", timeout=10.0)
+        if not succ or exp_detail.get("status") != "completed":
+            self.log("APP_E2E", "Experiment did not complete successfully.", "FAIL")
+            self.report["e2e_application_workflow"] = {"success": False}
+            return False
+
+        if exp_detail.get("exit_code") != 0 or exp_detail.get("metrics", {}).get("result_origin") != "COMPUTED" or self.report.get("worker_readiness", {}).get("vina_ready") is False:
+            self.log("APP_E2E", "Experiment result did not indicate successful native computation.", "FAIL")
+            self.report["e2e_application_workflow"] = {"success": False}
+            return False
+
+        self.log("APP_E2E", f"Docking experiment completed natively (Exp ID: {dock_exp_id}). Best score: {dock_res.get('best_docking_score')} kcal/mol", "PASS")
+
 
         # 5. Provenance DAG Check
         succ, prov = http_get(f"{self.app_url}/api/projects/{proj_id}/provenance", timeout=10.0)
@@ -475,17 +508,72 @@ class NativeValidationHarness:
     # STAGE 7: COMPILE AND WRITE VALIDATION REPORT
     # -------------------------------------------------------------------------
     def compile_report(self, json_path: str = "native_validation_report.json", html_path: str = "native_validation_report.html"):
+        w_ready = self.report.get("worker_readiness", {})
+
+        preflight_ok = self.report.get("preflight_checks", {}).get("data_dir_writable", True)
+        worker_live_ok = w_ready.get("health") == "OK"
+        w_rdk = w_ready.get("rdkit_ready", False)
+        w_vina = w_ready.get("vina_ready", False)
+
+        rdk_proof = self.report.get("rdkit_proof", {})
+        rdk_proof_ok = rdk_proof.get("is_native_rdkit") is True and rdk_proof.get("status") == "COMPLETED"
+
+        rdk_suite = self.report.get("rdkit_integration_suite", {})
+        rdk_suite_ok = rdk_suite.get("validation_passed") is True and rdk_suite.get("successful_count") == 55 and rdk_suite.get("failed_count") == 0
+
+        vina_proof = self.report.get("vina_proof", {})
+        vina_proof_ok = vina_proof.get("is_native_vina_executed") is True and vina_proof.get("status") == "COMPLETED" and vina_proof.get("successful_count", 0) > 0 and vina_proof.get("failed_count", 0) == 0 and vina_proof.get("exit_code", 0) == 0
+
+        e2e = self.report.get("e2e_application_workflow", {})
+        e2e_succ = e2e.get("success", False)
+
+        all_mandatory_checks = [
+            preflight_ok,
+            worker_live_ok,
+            w_rdk,
+            w_vina,
+            rdk_proof_ok,
+            rdk_suite_ok,
+            vina_proof_ok,
+            e2e_succ
+        ]
+
+        if all(all_mandatory_checks):
+            overall = "NATIVE_RUNTIME_VERIFIED"
+        elif e2e_succ or worker_live_ok:
+            overall = "PARTIALLY_VERIFIED"
+        else:
+            overall = "VALIDATION_FAILED"
+
+        self.report["overall_status"] = overall
+
+        summary = [
+            {"item": "Pre-flight Environment Check", "status": "PASS" if preflight_ok else "FAIL"},
+            {"item": "Scientific Worker Service Liveness", "status": "PASS" if worker_live_ok else "FAIL"},
+            {"item": "Native RDKit Kernel Execution", "status": "PASS" if rdk_proof_ok else "FAIL"},
+            {"item": "55-Molecule Diversity Benchmark", "status": "PASS" if rdk_suite_ok else "FAIL"},
+            {"item": "Native AutoDock Vina Execution", "status": "PASS" if vina_proof_ok else "FAIL"},
+            {"item": "App ↔ Worker E2E Workflow", "status": "PASS" if e2e_succ else "FAIL"},
+            {"item": "Relational Provenance DAG", "status": "PASS" if e2e.get("provenance_edges", 0) > 0 else "FAIL"},
+            {"item": "Reproducibility Manifest Export", "status": "PASS" if e2e_succ else "FAIL"},
+            {"item": "Automated Experiment Reproduction", "status": "PASS" if e2e.get("reproduction_match") else "WARN"}
+        ]
+        self.report["summary_table"] = summary
+
+        # 1. Write JSON Report(self, json_path: str = "native_validation_report.json", html_path: str = "native_validation_report.html"):
         # Evaluate Overall Status
         w_rdk = self.report.get("worker_readiness", {}).get("rdkit_ready", False)
         w_vina = self.report.get("worker_readiness", {}).get("vina_ready", False)
         e2e_succ = self.report.get("e2e_application_workflow", {}).get("success", False)
 
-        if w_rdk and w_vina and e2e_succ:
+
+        if all(all_mandatory_checks):
             overall = "NATIVE_RUNTIME_VERIFIED"
-        elif e2e_succ:
+        elif e2e_succ or worker_live_ok:
             overall = "PARTIALLY_VERIFIED"
         else:
-            overall = "NOT_VERIFIED"
+            overall = "VALIDATION_FAILED"
+
 
         self.report["overall_status"] = overall
 
