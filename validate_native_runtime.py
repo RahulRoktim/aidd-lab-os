@@ -354,12 +354,13 @@ class NativeValidationHarness:
         self.report["vina_proof"] = vina_data
 
 
-        if is_native_vina and vina_data.get('exit_code') == 0:
+
+        if is_native_vina and vina_data.get('status') == 'COMPLETED' and vina_data.get('exit_code') == 0 and vina_data.get('successful_count', 0) > 0 and vina_data.get('failed_count', 0) == 0:
             self.log('VINA_PROOF', f"Native AutoDock Vina subprocess executed successfully. Best Affinity: {vina_data['best_affinity_kcal_mol']} kcal/mol ({vina_data['poses_count']} poses generated)", 'PASS')
             return True
         elif results:
             self.log('VINA_PROOF', f"Executed via Vina test fixture/fallback. Score: {results[0].get('docking_score')} kcal/mol [Origin: {results[0].get('result_origin')}]", 'INFO')
-            return True
+            return False
         else:
             self.log('VINA_PROOF', f"Docking failed with {len(failures)} failure records", 'FAIL')
             return False
@@ -522,10 +523,14 @@ class NativeValidationHarness:
         rdk_suite_ok = rdk_suite.get("validation_passed") is True and rdk_suite.get("successful_count") == 55 and rdk_suite.get("failed_count") == 0
 
         vina_proof = self.report.get("vina_proof", {})
-        vina_proof_ok = vina_proof.get("is_native_vina_executed") is True and vina_proof.get("status") == "COMPLETED" and vina_proof.get("successful_count", 0) > 0 and vina_proof.get("failed_count", 0) == 0 and vina_proof.get("exit_code", 0) == 0
+        vina_proof_ok = vina_proof.get("is_native_vina_executed") is True and vina_proof.get("status") == "COMPLETED" and vina_proof.get("successful_count", 0) > 0 and vina_proof.get("failed_count", 0) == 0 and vina_proof.get("exit_code") == 0
 
         e2e = self.report.get("e2e_application_workflow", {})
         e2e_succ = e2e.get("success", False)
+
+        prov_ok = e2e.get("provenance_edges", 0) > 0
+        repro_ok = e2e.get("reproduction_match") is True
+
 
         all_mandatory_checks = [
             preflight_ok,
@@ -535,11 +540,27 @@ class NativeValidationHarness:
             rdk_proof_ok,
             rdk_suite_ok,
             vina_proof_ok,
-            e2e_succ
+            e2e_succ,
+            prov_ok,
+            repro_ok
         ]
+
+        self.report["mandatory_checks"] = {
+            "preflight": preflight_ok,
+            "worker_live": worker_live_ok,
+            "worker_rdkit": w_rdk,
+            "worker_vina": w_vina,
+            "rdkit_proof": rdk_proof_ok,
+            "rdkit_suite": rdk_suite_ok,
+            "vina_proof": vina_proof_ok,
+            "e2e": e2e_succ,
+            "provenance": prov_ok,
+            "reproduction": repro_ok
+        }
 
         if all(all_mandatory_checks):
             overall = "NATIVE_RUNTIME_VERIFIED"
+
         elif e2e_succ or worker_live_ok:
             overall = "PARTIALLY_VERIFIED"
         else:
@@ -554,9 +575,9 @@ class NativeValidationHarness:
             {"item": "55-Molecule Diversity Benchmark", "status": "PASS" if rdk_suite_ok else "FAIL"},
             {"item": "Native AutoDock Vina Execution", "status": "PASS" if vina_proof_ok else "FAIL"},
             {"item": "App ↔ Worker E2E Workflow", "status": "PASS" if e2e_succ else "FAIL"},
-            {"item": "Relational Provenance DAG", "status": "PASS" if e2e.get("provenance_edges", 0) > 0 else "FAIL"},
+            {"item": "Relational Provenance DAG", "status": "PASS" if prov_ok else "FAIL"},
             {"item": "Reproducibility Manifest Export", "status": "PASS" if e2e_succ else "FAIL"},
-            {"item": "Automated Experiment Reproduction", "status": "PASS" if e2e.get("reproduction_match") else "WARN"}
+            {"item": "Automated Experiment Reproduction", "status": "PASS" if repro_ok else "WARN"}
         ]
         self.report["summary_table"] = summary
 

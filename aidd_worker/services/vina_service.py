@@ -182,7 +182,7 @@ def execute_docking_job(job_id: str, request: DockingJobRequest) -> Tuple[List[D
     start_time = time.time()
     total_stdout = []
     total_stderr = []
-    last_exit_code = 0
+    last_exit_code = None
 
     for lig in request.ligands:
         lig_id = lig.get("id") or "LIG-001"

@@ -33,7 +33,7 @@ def save_job_to_disk(job: JobResult):
     os.makedirs(job_dir, exist_ok=True)
     manifest_path = os.path.join(job_dir, "job_manifest.json")
     with open(manifest_path, "w", encoding="utf-8") as f:
-        f.write(job.json(indent=2))
+        f.write(job.model_dump_json(indent=2))
 
 def get_job(job_id: str) -> Optional[JobResult]:
     if job_id in _JOBS_REGISTRY:
@@ -103,7 +103,7 @@ def run_descriptor_job(request: DescriptorJobRequest) -> JobResult:
         job.failures = failures
         job.artifacts = artifacts
         job.results = successful
-        job.exit_code = meta.get("exit_code", 0)
+        job.exit_code = meta.get("exit_code")
         job.metrics = {
             "molecules_processed": len(request.molecules),
             "success_rate": f"{round((len(successful)/max(1, len(request.molecules)))*100, 1)}%",
@@ -175,7 +175,7 @@ def run_standardize_job(request: StandardizeJobRequest) -> JobResult:
         job.failures = failures
         job.artifacts = artifacts
         job.results = successful
-        job.exit_code = meta.get("exit_code", 0)
+        job.exit_code = meta.get("exit_code")
         job.metrics = {
             "molecules_processed": len(request.molecules),
             "retention_rate": f"{round((len(successful)/max(1, len(request.molecules)))*100, 1)}%",
@@ -247,7 +247,7 @@ def run_docking_job(request: DockingJobRequest) -> JobResult:
         job.results = results
         job.stdout = meta.get("stdout", "")
         job.stderr = meta.get("stderr", "")
-        job.exit_code = meta.get("exit_code", 0)
+        job.exit_code = meta.get("exit_code")
         job.metrics = {
             "ligands_docked": len(results),
             "best_affinity_kcal_mol": min([r["best_affinity_kcal_mol"] for r in results]) if results else 0.0,

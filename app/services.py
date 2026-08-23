@@ -726,8 +726,18 @@ def import_or_run_docking(project_id: str,
         if not receptor_pdbqt or not prepared_ligands:
             raise Exception("Native execution requires explicit receptor_pdbqt and prepared_ligands in the request.")
 
-        # Create job directly
+                # Create job directly
         new_job_id = str(uuid.uuid4())
+        new_job = Job(
+            id=new_job_id,
+            job_type="docking",
+            status="RUNNING",
+            execution_mode="NATIVE",
+            started_at=datetime.utcnow()
+        )
+        db = next(get_db()) # Grab a db session for this synchronous call
+        db.add(new_job)
+        db.commit()
 
         # Build worker payload
         worker_payload = {

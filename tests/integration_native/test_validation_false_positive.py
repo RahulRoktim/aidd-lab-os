@@ -11,7 +11,7 @@ def test_validator_false_positive():
         "worker_readiness": {"health": "OK", "rdkit_ready": True, "vina_ready": True},
         "rdkit_proof": {"is_native_rdkit": True, "status": "COMPLETED"},
         "rdkit_integration_suite": {"validation_passed": True, "successful_count": 55, "failed_count": 0},
-        "vina_proof": {"is_native_vina_executed": True, "status": "COMPLETED", "successful_count": 1, "failed_count": 0, "exit_code": 1}, # Failed exit code
+        "vina_proof": {"is_native_vina_executed": True, "status": "COMPLETED", "successful_count": 1, "failed_count": 0, "exit_code": 1},
         "e2e_application_workflow": {"success": True, "provenance_edges": 1, "reproduction_match": True}
     }
 
