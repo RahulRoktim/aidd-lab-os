@@ -1,0 +1,40 @@
+{
+  "manifest_version": "1.4.0",
+  "created_at": "2026-08-23T00:00:00Z",
+  "benchmark_systems": [
+    {
+      "system_name": "HIV-1 Protease Active Site (1HSG)",
+      "pdb_id": "1HSG",
+      "target": "HIV-1 Retropepsin Protease Homodimer",
+      "receptor_file": "1hsg_receptor.pdbqt",
+      "ligand_file": "indinavir_ligand.pdbqt",
+      "documented_binding_site": {
+        "center_x": 16.0,
+        "center_y": 25.0,
+        "center_z": 4.0,
+        "size_x": 18.0,
+        "size_y": 18.0,
+        "size_z": 18.0
+      },
+      "source_url": "https://files.rcsb.org/download/1HSG.pdb",
+      "preparation_method": "AutoDockTools Gasteiger charges, polar hydrogens added, non-polar merged"
+    },
+    {
+      "system_name": "EGFR Kinase ATP Binding Pocket (4WKQ)",
+      "pdb_id": "4WKQ",
+      "target": "EGFR Kinase Domain (T790M/C797S Mut)",
+      "receptor_file": "4wkq_receptor.pdbqt",
+      "ligand_file": "erlotinib_ligand.pdbqt",
+      "documented_binding_site": {
+        "center_x": 22.4,
+        "center_y": 0.8,
+        "center_z": 52.5,
+        "size_x": 20.0,
+        "size_y": 20.0,
+        "size_z": 20.0
+      },
+      "source_url": "https://files.rcsb.org/download/4WKQ.pdb",
+      "preparation_method": "Standard PDBQT format with AutoDock atom types"
+    }
+  ]
+}

@@ -1,0 +1,39 @@
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
+
+# Environment / secrets
+.env
+.env.*
+!.env.example
+
+# Local databases
+*.db
+*.sqlite
+*.sqlite3
+
+# Runtime scientific data
+data/jobs/
+data/artifacts/
+jobs_data/
+artifacts/
+
+# Generated validation reports
+native_validation_report.json
+native_validation_report.html
+rdkit_full_validation.json
+
+# Logs
+*.log
+
+# OS/editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# Conda
+.conda/

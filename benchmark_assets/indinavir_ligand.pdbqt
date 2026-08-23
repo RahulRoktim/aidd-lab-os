@@ -1,0 +1,14 @@
+REMARK  NAME = INDINAVIR_LIGAND_FRAGMENT
+REMARK  SOURCE = Co-crystallized ligand from RCSB PDB 1HSG
+REMARK  PREPARATION = AutoDockTools torsions defined
+ROOT
+ATOM      1  C1  UNL     1      15.250  24.150   5.120  1.00  0.00     0.080 C 
+ATOM      2  C2  UNL     1      16.120  23.250   4.450  1.00  0.00     0.120 A 
+ATOM      3  N3  UNL     1      17.450  23.550   4.620  1.00  0.00    -0.350 NA
+ATOM      4  C4  UNL     1      17.850  24.650   5.350  1.00  0.00     0.350 A 
+ATOM      5  C5  UNL     1      17.120  25.550   6.020  1.00  0.00    -0.050 A 
+ATOM      6  N6  UNL     1      15.820  25.320   5.920  1.00  0.00    -0.350 NA
+ATOM      7  O7  UNL     1      19.120  24.850   5.450  1.00  0.00    -0.550 OA
+ATOM      8  C8  UNL     1      14.150  23.850   6.050  1.00  0.00     0.150 C 
+ENDROOT
+TORSDOF 3

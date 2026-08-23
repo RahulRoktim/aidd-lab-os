@@ -1,0 +1,60 @@
+version: '3.8'
+
+services:
+  aidd-worker:
+    build:
+      context: .
+      dockerfile: aidd_worker/Dockerfile
+    container_name: aidd-scientific-worker
+    restart: unless-stopped
+    ports:
+      - "8001:8001"
+    environment:
+      - AIDD_WORKER_PORT=8001
+      - AIDD_WORKER_HOST=0.0.0.0
+      - AIDD_WORKER_JOBS_DIR=/data/jobs
+      - VINA_BIN=/opt/conda/envs/aidd-worker-env/bin/vina
+      - MAX_DOCKING_TIMEOUT=600
+    volumes:
+      - aidd-scientific-data:/data
+    networks:
+      - aidd-network
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python3",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://localhost:8001/health')"
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  aidd-app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: aidd-lab-os-app
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    environment:
+      - AIDD_DB_PATH=/tmp/aidd_lab.db
+      - AIDD_WORKER_URL=http://aidd-worker:8001
+      - PORT=8000
+    volumes:
+      - aidd-scientific-data:/data
+    depends_on:
+      aidd-worker:
+        condition: service_healthy
+    networks:
+      - aidd-network
+
+volumes:
+  aidd-scientific-data:
+    driver: local
+
+networks:
+  aidd-network:
+    driver: bridge

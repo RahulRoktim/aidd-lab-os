@@ -1,0 +1,16 @@
+REMARK  NAME = HIV1_PROTEASE_1HSG_RECEPTOR
+REMARK  SOURCE = RCSB PDB 1HSG (Catalytic Active Site Fragment)
+REMARK  PREPARATION = AutoDockTools standard Gasteiger charges, non-polar hydrogens merged
+ATOM      1  N   ASP A  25      16.520  24.850   3.920  1.00 15.00    -0.350 N 
+ATOM      2  CA  ASP A  25      15.820  25.650   4.950  1.00 15.00     0.100 C 
+ATOM      3  C   ASP A  25      16.250  27.120   4.920  1.00 15.00     0.550 C 
+ATOM      4  O   ASP A  25      17.420  27.450   5.120  1.00 15.00    -0.550 O 
+ATOM      5  CB  ASP A  25      15.980  25.020   6.350  1.00 15.00    -0.100 C 
+ATOM      6  CG  ASP A  25      15.120  23.820   6.520  1.00 15.00     0.700 C 
+ATOM      7  OD1 ASP A  25      15.650  22.750   6.850  1.00 15.00    -0.800 OA
+ATOM      8  OD2 ASP A  25      13.920  24.120   6.320  1.00 15.00    -0.800 OA
+ATOM      9  N   GLY A  27      13.250  28.150   3.250  1.00 15.00    -0.350 N 
+ATOM     10  CA  GLY A  27      12.450  29.350   2.950  1.00 15.00     0.100 C 
+ATOM     11  C   GLY A  27      12.850  30.520   3.820  1.00 15.00     0.550 C 
+ATOM     12  O   GLY A  27      13.980  30.650   4.250  1.00 15.00    -0.550 O 
+TER

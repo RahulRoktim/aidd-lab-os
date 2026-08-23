@@ -1,0 +1,43 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>AIDD Lab OS — A Reproducible Workspace for Computational Drug Discovery</title>
+  <link rel="stylesheet" href="/static/css/app.css">
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>🧪</text></svg>">
+</head>
+<body>
+  <div id="app">
+    <!-- Persistent Left Sidebar -->
+    <aside class="sidebar" id="app-sidebar"></aside>
+
+    <!-- Main Workspace Container -->
+    <div class="main-wrapper">
+      <!-- Top Application Header -->
+      <header class="app-header">
+        <div class="breadcrumbs" id="app-header-breadcrumbs">
+          <span class="breadcrumb-current">AIDD Lab OS</span>
+        </div>
+        <div class="header-actions">
+          <button class="btn btn-secondary btn-sm" onclick="AIDD.resetDemoData()">Demo Project</button>
+          <button class="btn btn-primary btn-sm" onclick="AIDD.openNewProjectModal()">+ New Project</button>
+        </div>
+      </header>
+
+      <!-- Project Contextual Navigation Tabs -->
+      <nav class="project-subnav" id="project-subnav-bar" style="display: none;"></nav>
+
+      <!-- Scrollable Main Page Area -->
+      <main class="page-content" id="main-page-content">
+        <div style="display: flex; align-items: center; justify-content: center; height: 100%; color: var(--text-muted);">
+          Loading AIDD Lab OS Research Workspace...
+        </div>
+      </main>
+    </div>
+  </div>
+
+  <script src="/static/js/provenance.js"></script>
+  <script src="/static/js/app.js"></script>
+</body>
+</html>
