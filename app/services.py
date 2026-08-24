@@ -735,7 +735,7 @@ def import_or_run_docking(project_id: str,
     worker_env_hash = None
     worker_is_native = False
     reproducibility_hash = None
-    exit_code = 0
+    exit_code = None
     worker_error = None
 
     if result_origin == "COMPUTED":
@@ -762,19 +762,26 @@ def import_or_run_docking(project_id: str,
             experiment_id=exp_id
         )
 
-        if succ and worker_res.get("status") == "COMPLETED":
+        if succ and worker_res.get("status") == "COMPLETED" and worker_res.get("exit_code") == 0 and len(worker_res.get("results", [])) > 0:
             worker_job_id = worker_res.get("job_id")
             worker_env_hash = worker_res.get("environment_sha256")
             worker_is_native = True
             reproducibility_hash = worker_res.get("reproducibility_hash")
-            exit_code = worker_res.get("exit_code") or 0
+            exit_code = worker_res.get("exit_code")
 
             # Map results
             for result in worker_res.get("results", []):
                 m_id = result.get("molecule_id")
                 score = result.get("docking_score")
                 if m_id and score is not None:
-                    docking_data[m_id] = float(score)
+                    docking_data[m_id] = {
+                        "score": float(score),
+                        "best_affinity_kcal_mol": result.get("best_affinity_kcal_mol"),
+                        "poses_count": result.get("poses_count"),
+                        "receptor_hash": result.get("receptor_hash"),
+                        "ligand_hash": result.get("ligand_hash"),
+                        "tool": result.get("tool")
+                    }
         else:
             worker_error = worker_res.get("failures", "Unknown worker error") if isinstance(worker_res, dict) else worker_res
             exit_code = worker_res.get("exit_code") if isinstance(worker_res, dict) and worker_res.get("exit_code") is not None else 1
@@ -857,7 +864,17 @@ def import_or_run_docking(project_id: str,
              continue # Native skipped this if it failed
 
         if m_id in docking_data:
-            score = docking_data[m_id]
+            data = docking_data[m_id]
+            if isinstance(data, dict):
+                score = data["score"]
+                actual_rec_hash = data.get("receptor_hash")
+                actual_lig_hash = data.get("ligand_hash")
+                actual_poses_count = data.get("poses_count")
+            else:
+                score = data
+                actual_rec_hash = None
+                actual_lig_hash = None
+                actual_poses_count = None
         else:
             # Fallback mock calculations
             n_rings = m.get("num_rings", 3)
@@ -868,13 +885,17 @@ def import_or_run_docking(project_id: str,
             noise = ((hash(m_id) % 20) / 10.0) - 1.0
             score = round(max(-14.0, min(-4.0, base_score + noise)), 1)
             docking_data[m_id] = score
+            actual_rec_hash = None
+            actual_lig_hash = None
+            actual_poses_count = None
 
         best_score = min(best_score, score)
 
         c.execute('''INSERT INTO docking_results
                      (id, project_id, molecule_id, experiment_id, docking_score, result_origin, receptor, docking_tool, pose_identifier, binding_site_coords, center_x, center_y, center_z, size_x, size_y, size_z, exhaustiveness, seed, vina_version, receptor_file_hash, ligand_file_hash, rmsd_lower_bound, rmsd_upper_bound, created_at)
                      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
-                  (gen_id("res"), project_id, m_id, exp_id, score, result_origin, receptor, docking_tool, "pose_1", "site", center_x, center_y, center_z, size_x, size_y, size_z, exhaustiveness, seed, tool_version, "hash", "hash", 0.0, 0.0, now_iso()))
+                  (gen_id("res"), project_id, m_id, exp_id, score, result_origin, receptor, docking_tool,
+                   f"pose_best_of_{actual_poses_count}" if actual_poses_count else None, None, center_x, center_y, center_z, size_x, size_y, size_z, exhaustiveness, seed, tool_version, actual_rec_hash, actual_lig_hash, None, None, now_iso()))
 
     if best_score == 999.0:
          best_score = None
@@ -906,8 +927,8 @@ def import_or_run_docking(project_id: str,
 
     return {
         "experiment_id": exp_id,
-        "output_dataset_id": in_ds["id"],
-        "output_dataset_label": in_ds["version_label"],
+        "output_dataset_id": out_ds_id if (worker_error is None and len(docking_data) > 0) else None,
+        "output_dataset_label": out_ds_label if (worker_error is None and len(docking_data) > 0) else None,
         "status": final_status,
         "exit_code": exit_code,
         "best_docking_score": best_score,
