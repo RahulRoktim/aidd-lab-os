@@ -7,6 +7,7 @@ from app.worker_client import get_worker_status
 
 client = TestClient(app)
 
+
 @pytest.mark.integration
 def test_app_worker_vina_e2e_true():
     # 1. Skip if worker isn't running / native tools aren't present
@@ -58,3 +59,14 @@ def test_app_worker_vina_e2e_true():
     assert "worker_job_id" in data["metrics"]
     assert "environment_sha256" in data["metrics"]
     assert data["metrics"]["is_native_vina_executed"] is True
+
+    # 5. Assert the database records
+    exp_id = data["experiment_id"]
+    exp_res = client.get(f"/api/experiments/{exp_id}")
+    assert exp_res.status_code == 200
+    exp = exp_res.json()
+
+    assert exp["status"] == "completed"
+    assert exp["output_dataset_id"] == data["output_dataset_id"]
+    assert exp["metrics"]["result_origin"] == "COMPUTED"
+    assert exp["metrics"]["exit_code"] == 0
