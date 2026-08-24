@@ -719,72 +719,6 @@ def import_or_run_docking(project_id: str,
                           notes: str = "",
                           receptor_pdbqt: Optional[str] = None,
                           prepared_ligands: Optional[list] = None) -> dict:
-
-    # 1) If NATIVE mode, explicitly require pdbqt assets
-    if result_origin == "COMPUTED":
-        from app.worker_client import worker_client
-        if not receptor_pdbqt or not prepared_ligands:
-            raise Exception("Native execution requires explicit receptor_pdbqt and prepared_ligands in the request.")
-
-                # Create job directly
-        new_job_id = str(uuid.uuid4())
-        new_job = Job(
-            id=new_job_id,
-            job_type="docking",
-            status="RUNNING",
-            execution_mode="NATIVE",
-            started_at=datetime.utcnow()
-        )
-        db = next(get_db()) # Grab a db session for this synchronous call
-        db.add(new_job)
-        db.commit()
-
-        # Build worker payload
-        worker_payload = {
-            "receptor_pdbqt": receptor_pdbqt,
-            "ligands": prepared_ligands,
-            "search_box": {
-                "center_x": center_x,
-                "center_y": center_y,
-                "center_z": center_z,
-                "size_x": size_x,
-                "size_y": size_y,
-                "size_z": size_z
-            },
-            "exhaustiveness": exhaustiveness,
-            "execution_mode": "NATIVE"
-        }
-
-        try:
-            worker_res = worker_client.submit_docking_job(worker_payload, timeout=60.0)
-            if worker_res.get("status") != "COMPLETED":
-                # FAILED state mapping
-                return {
-                    "experiment_id": new_job_id,
-                    "status": "failed",
-                    "exit_code": worker_res.get("exit_code", 1),
-                    "best_docking_score": 0.0,
-                    "metrics": {"result_origin": "COMPUTED", "error": "Worker docking failed."}
-                }
-
-            # Map results
-            return {
-                "experiment_id": new_job_id,
-                "status": "completed",
-                "exit_code": worker_res.get("exit_code", 0),
-                "best_docking_score": worker_res.get("results", [{}])[0].get("docking_score", 0),
-                "metrics": {"result_origin": "COMPUTED"}
-            }
-
-        except Exception as e:
-            return {
-                "experiment_id": new_job_id,
-                "status": "failed",
-                "exit_code": 1,
-                "best_docking_score": 0.0,
-                "metrics": {"result_origin": "COMPUTED", "error": str(e)}
-            }
-
     project = get_project(project_id)
     in_ds = get_dataset_detail(input_dataset_id)
     if not project or not in_ds:
@@ -795,160 +729,191 @@ def import_or_run_docking(project_id: str,
     start_time = time.time()
 
     docking_data = {}
+
+    # NEW LOGIC: Native Worker Integration
+    worker_job_id = None
+    worker_env_hash = None
+    worker_is_native = False
+    reproducibility_hash = None
+    exit_code = 0
+    worker_error = None
+
+    if result_origin == "COMPUTED":
+        from app.worker_client import submit_docking_job
+        if not receptor_pdbqt or not prepared_ligands:
+            raise ValueError("Native execution requires explicit receptor_pdbqt and prepared_ligands in the request.")
+
+        search_box = {
+            "center_x": center_x,
+            "center_y": center_y,
+            "center_z": center_z,
+            "size_x": size_x,
+            "size_y": size_y,
+            "size_z": size_z
+        }
+
+        succ, worker_res = submit_docking_job(
+            receptor_pdbqt=receptor_pdbqt,
+            ligands=prepared_ligands,
+            search_box=search_box,
+            exhaustiveness=exhaustiveness,
+            num_modes=9,
+            seed=seed,
+            experiment_id=exp_id
+        )
+
+        if succ and worker_res.get("status") == "COMPLETED":
+            worker_job_id = worker_res.get("job_id")
+            worker_env_hash = worker_res.get("environment_sha256")
+            worker_is_native = True
+            reproducibility_hash = worker_res.get("reproducibility_hash")
+            exit_code = worker_res.get("exit_code") or 0
+
+            # Map results
+            for result in worker_res.get("results", []):
+                m_id = result.get("molecule_id")
+                score = result.get("docking_score")
+                if m_id and score is not None:
+                    docking_data[m_id] = float(score)
+        else:
+            worker_error = worker_res.get("failures", "Unknown worker error") if isinstance(worker_res, dict) else worker_res
+            exit_code = worker_res.get("exit_code") if isinstance(worker_res, dict) and worker_res.get("exit_code") is not None else 1
+
+    else:
+        # Fallback IMPORTED logic
+        if custom_scores_csv:
+            reader = csv.DictReader(io.StringIO(custom_scores_csv.strip()))
+            for row in reader:
+                m_id = row.get("molecule_id") or row.get("id")
+                score_str = row.get("docking_score") or row.get("score") or row.get("affinity")
+                if m_id and score_str:
+                    try:
+                        docking_data[m_id] = float(score_str)
+                    except:
+                        pass
+
     receptor_hash = compute_sha256(f"{receptor}:{grid_center}:{grid_size}:{exhaustiveness}")
 
-    if custom_scores_csv:
-        reader = csv.DictReader(io.StringIO(custom_scores_csv.strip()))
-        for row in reader:
-            m_id = row.get("molecule_id") or row.get("id")
-            score_str = row.get("docking_score") or row.get("score") or row.get("affinity")
-            if m_id and score_str:
-                try:
-                    docking_data[m_id] = float(score_str)
-                except:
-                    pass
+    # Process molecules
+    conn = get_db_connection()
+    c = conn.cursor()
+    best_score = 999.0
+
+    duration = round(time.time() - start_time, 2)
+    final_status = 'completed' if worker_error is None else 'failed'
+
+    metrics = {
+        "molecules_docked": len(docking_data) if result_origin == "COMPUTED" else len(in_ds["molecules"]),
+        "grid_center": grid_center,
+        "grid_size": grid_size,
+        "exhaustiveness": exhaustiveness,
+        "result_origin": result_origin,
+        "duration_seconds": duration,
+        "worker_job_id": worker_job_id,
+        "environment_sha256": worker_env_hash,
+        "is_native_vina_executed": worker_is_native,
+        "reproducibility_hash": reproducibility_hash,
+        "error": str(worker_error) if worker_error else None
+    }
+
+
+    v_row = conn.execute("SELECT MAX(version) as max_v FROM datasets WHERE project_id = ?", (project_id,)).fetchone()
+    next_v = (v_row['max_v'] or 0) + 1
+    out_ds_id = gen_id("ds")
+    out_ds_label = f"{project['name'].replace(' ', '_')}_dataset_v{next_v}"
+
+    passed_mols = [m for m in in_ds["molecules"] if result_origin != "COMPUTED" or m["id"] in docking_data]
+    dataset_content_hash = compute_sha256("".join([m['id'] for m in passed_mols]))
+
+    c.execute('''INSERT INTO datasets (id, project_id, name, version, version_label, parent_dataset_id, experiment_id, description, stage, molecule_count, sha256_hash, created_at)
+                 VALUES (?, ?, ?, ?, ?, ?, NULL, ?, 'Docking', ?, ?, ?)''',
+              (out_ds_id, project_id, f"Docked Dataset v{next_v}", next_v, out_ds_label, input_dataset_id,
+               f"Docked against {receptor} using {docking_tool} ({result_origin}).", len(passed_mols), dataset_content_hash, now_iso()))
+
+    for m in passed_mols:
+        c.execute("INSERT OR IGNORE INTO dataset_molecules (dataset_id, molecule_id, included_at) VALUES (?, ?, ?)",
+                  (out_ds_id, m["id"], now_iso()))
+
+    # INSERT INTO experiments FIRST so FK constraint succeeds
+    c.execute('''INSERT INTO experiments
+                 (id, project_id, name, experiment_type, status, stage, input_dataset_id, output_dataset_id, tool, tool_version, started_at, completed_at, duration_seconds, molecules_in, molecules_out, molecules_failed, is_locked, reproduction_of_id, reproduction_match, environment_info, parameters, metrics, logs, warnings, notes, notes_log, reproducibility_manifest, created_at)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
+              (exp_id, project_id, experiment_name, 'docking', final_status, 'Docking', input_dataset_id, out_ds_id, docking_tool, tool_version,
+               start_ts, now_iso(), duration, len(in_ds["molecules"]), len(docking_data) if result_origin == "COMPUTED" else len(in_ds["molecules"]), 0, 1, None, None,
+               json.dumps(get_system_environment_info()),
+               json.dumps({
+                   "docking_tool": docking_tool, "tool_version": tool_version,
+                   "receptor": receptor, "grid_center": grid_center, "grid_size": grid_size, "exhaustiveness": exhaustiveness,
+                   "seed": seed, "receptor_hash": receptor_hash, "result_origin": result_origin,
+                   "center_x": center_x, "center_y": center_y, "center_z": center_z,
+                   "size_x": size_x, "size_y": size_y, "size_z": size_z
+               }),
+               json.dumps(metrics), "", "", notes, json.dumps([]), "", start_ts))
 
     for m in in_ds["molecules"]:
         m_id = m["id"]
+
+        if result_origin == "COMPUTED" and m_id not in docking_data:
+             continue # Native skipped this if it failed
+
         if m_id in docking_data:
             score = docking_data[m_id]
         else:
+            # Fallback mock calculations
             n_rings = m.get("num_rings", 3)
             hba = m.get("hba", 5)
             hbd = m.get("hbd", 1)
             logp = m.get("logp", 3.0)
-            base_affinity = -6.0 - (0.55 * min(4, n_rings)) - (0.25 * min(4, hbd)) - (0.15 * min(6, hba)) - (0.1 * min(4.0, max(0.0, logp)))
-            score = round(base_affinity + ((hash(m["smiles"]) % 100) / 300.0) - 0.2, 1)
+            base_score = -5.0 - (n_rings * 0.8) - ((hba+hbd) * 0.2)
+            noise = ((hash(m_id) % 20) / 10.0) - 1.0
+            score = round(max(-14.0, min(-4.0, base_score + noise)), 1)
+            docking_data[m_id] = score
 
-        docking_data[m_id] = score
+        best_score = min(best_score, score)
 
-    end_time = time.time()
-    duration = round(end_time - start_time, 3)
-    end_ts = now_iso()
+        c.execute('''INSERT INTO docking_results
+                     (id, project_id, molecule_id, experiment_id, docking_score, result_origin, receptor, docking_tool, pose_identifier, binding_site_coords, center_x, center_y, center_z, size_x, size_y, size_z, exhaustiveness, seed, vina_version, receptor_file_hash, ligand_file_hash, rmsd_lower_bound, rmsd_upper_bound, created_at)
+                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
+                  (gen_id("res"), project_id, m_id, exp_id, score, result_origin, receptor, docking_tool, "pose_1", "site", center_x, center_y, center_z, size_x, size_y, size_z, exhaustiveness, seed, tool_version, "hash", "hash", 0.0, 0.0, now_iso()))
 
-    with get_db() as conn:
-        v_row = conn.execute("SELECT MAX(version) as max_v FROM datasets WHERE project_id = ?", (project_id,)).fetchone()
-        next_v = (v_row['max_v'] or 0) + 1
-        out_ds_id = gen_id("ds")
-        out_ds_label = f"{project['name'].replace(' ', '_')}_dataset_v{next_v}"
-        dataset_content_hash = compute_sha256("".join([f"{m['id']}:{docking_data[m['id']]}" for m in in_ds["molecules"]]))
+    if best_score == 999.0:
+         best_score = None
 
-        conn.execute(
-            """
-            INSERT INTO datasets (id, project_id, name, version, version_label, parent_dataset_id, experiment_id, description, stage, molecule_count, sha256_hash, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, NULL, ?, 'Docking', ?, ?, ?)
-            """,
-            (
-                out_ds_id, project_id, f"Docked Dataset v{next_v}", next_v, out_ds_label,
-                input_dataset_id,
-                f"Docked against {receptor} using {docking_tool} ({result_origin}). Total {len(in_ds['molecules'])} docked.",
-                len(in_ds["molecules"]), dataset_content_hash, end_ts
-            )
-        )
+    metrics["best_docking_score"] = best_score
 
-        for m in in_ds["molecules"]:
-            conn.execute(
-                "INSERT OR IGNORE INTO dataset_molecules (dataset_id, molecule_id, included_at) VALUES (?, ?, ?)",
-                (out_ds_id, m["id"], end_ts)
-            )
+    # Update experiments again with best_score
+    c.execute("UPDATE experiments SET metrics = ? WHERE id = ?", (json.dumps(metrics), exp_id))
 
-        parameters = {
-            "docking_tool": docking_tool,
-            "tool_version": tool_version,
-            "result_origin": result_origin,
-            "receptor_target": receptor,
-            "receptor_sha256": receptor_hash,
-            "grid_center": grid_center,
-            "center_x": center_x,
-            "center_y": center_y,
-            "center_z": center_z,
-            "grid_size": grid_size,
-            "size_x": size_x,
-            "size_y": size_y,
-            "size_z": size_z,
-            "exhaustiveness": exhaustiveness,
-            "seed": seed,
-            "input_dataset": in_ds["version_label"],
-            "notes": notes
-        }
-        all_scores = list(docking_data.values())
-        metrics = {
-            "molecules_docked": len(all_scores),
-            "result_origin": result_origin,
-            "best_affinity_kcal_mol": min(all_scores) if all_scores else 0.0,
-            "mean_affinity_kcal_mol": round(sum(all_scores) / max(1, len(all_scores)), 2) if all_scores else 0.0,
-            "molecules_below_neg_8_kcal": sum(1 for s in all_scores if s <= -8.0)
-        }
-        log_lines = [
-            f"[{start_ts}] [INFO] Initializing {docking_tool} v{tool_version} [Origin: {result_origin}]",
-            f"[{start_ts}] [INFO] Target Receptor: {receptor} (Hash: {receptor_hash[:12]}...)",
-            f"[{start_ts}] [INFO] Grid Center: ({center_x}, {center_y}, {center_z}) | Size: ({size_x}x{size_y}x{size_z}) | Exhaustiveness: {exhaustiveness}",
-            f"[{end_ts}] [INFO] Docking binding energy recorded for {len(all_scores)} ligands",
-            f"[{end_ts}] [INFO] Best affinity: {min(all_scores) if all_scores else 0.0} kcal/mol"
-        ]
+    c.execute('''INSERT INTO provenance_edges (id, project_id, source_id, source_type, target_id, target_type, relation_type, metadata_json, created_at)
+                 VALUES (?, ?, ?, 'dataset', ?, 'experiment', 'wasUsedBy', ?, ?)''',
+              (gen_id("prov"), project_id, input_dataset_id, exp_id, json.dumps({"role": "ligand_library"}), now_iso()))
 
-        conn.execute(
-            """
-            INSERT INTO experiments
-            (id, project_id, name, experiment_type, status, stage, input_dataset_id, output_dataset_id, tool, tool_version, started_at, completed_at, duration_seconds, molecules_in, molecules_out, molecules_failed, is_locked, reproduction_of_id, reproduction_match, environment_info, parameters, metrics, logs, warnings, notes, notes_log, reproducibility_manifest, created_at)
-            VALUES (?, ?, ?, 'docking', 'completed', 'Docking', ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 1, NULL, NULL, ?, ?, ?, ?, '', ?, '[]', '', ?)
-            """,
-            (
-                exp_id, project_id, experiment_name, input_dataset_id, out_ds_id,
-                docking_tool, tool_version,
-                start_ts, end_ts, duration, len(in_ds["molecules"]), len(in_ds["molecules"]),
-                json.dumps(get_system_environment_info()), json.dumps(parameters), json.dumps(metrics),
-                "\n".join(log_lines), notes, start_ts
-            )
-        )
+    conn.commit()
+    conn.close()
 
-        conn.execute("UPDATE datasets SET experiment_id = ? WHERE id = ?", (exp_id, out_ds_id))
 
-        for m in in_ds["molecules"]:
-            score = docking_data[m["id"]]
-            ligand_hash = m.get("sha256_hash") or compute_sha256(m["smiles"])
-            conn.execute(
-                """
-                INSERT OR REPLACE INTO docking_results
-                (id, project_id, molecule_id, experiment_id, docking_score, result_origin, receptor, docking_tool, pose_identifier, binding_site_coords, center_x, center_y, center_z, size_x, size_y, size_z, exhaustiveness, seed, vina_version, receptor_file_hash, ligand_file_hash, rmsd_lower_bound, rmsd_upper_bound, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pose_1.pdbqt', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0.0, 1.45, ?)
-                """,
-                (
-                    gen_id("dock"), project_id, m["id"], exp_id, score, result_origin,
-                    receptor, docking_tool, grid_center, center_x, center_y, center_z, size_x, size_y, size_z,
-                    exhaustiveness, seed, tool_version, receptor_hash, ligand_hash, end_ts
-                )
-            )
 
-        conn.execute(
-            """
-            INSERT INTO provenance_edges (id, project_id, source_id, source_type, target_id, target_type, relation_type, metadata_json, created_at)
-            VALUES (?, ?, ?, 'dataset', ?, 'experiment', 'processed_by', ?, ?)
-            """,
-            (gen_id("edge"), project_id, input_dataset_id, exp_id, json.dumps({"stage": "docking", "origin": result_origin}), end_ts)
-        )
-        conn.execute(
-            """
-            INSERT INTO provenance_edges (id, project_id, source_id, source_type, target_id, target_type, relation_type, metadata_json, created_at)
-            VALUES (?, ?, ?, 'experiment', ?, 'dataset', 'generated_from', ?, ?)
-            """,
-            (gen_id("edge"), project_id, exp_id, out_ds_id, json.dumps({"action": "docking_dataset", "sha256": dataset_content_hash}), end_ts)
-        )
-
-        conn.execute("UPDATE projects SET current_stage = 'Docking', updated_at = ? WHERE id = ?", (end_ts, project_id))
+    if worker_error:
+        # We optionally insert into experiment_failures here as well
+        conn = get_db_connection()
+        c = conn.cursor()
+        c.execute('''INSERT INTO experiment_failures
+                     (id, experiment_id, molecule_id, molecule_name, smiles, pipeline_stage, error_type, error_message, created_at)
+                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)''',
+                  (gen_id("fail"), exp_id, "SYSTEM", "SYSTEM", "SYSTEM", "execution", "WorkerDockingError", str(worker_error), now_iso()))
+        conn.commit()
+        conn.close()
 
     return {
         "experiment_id": exp_id,
-        "output_dataset_id": out_ds_id,
-        "output_dataset_label": out_ds_label,
-        "result_origin": result_origin,
-        "molecules_docked": len(in_ds["molecules"]),
-        "best_docking_score": min(all_scores) if all_scores else 0.0
+        "output_dataset_id": in_ds["id"],
+        "output_dataset_label": in_ds["version_label"],
+        "status": final_status,
+        "exit_code": exit_code,
+        "best_docking_score": best_score,
+        "molecules_docked": len(docking_data) if result_origin == "COMPUTED" else len(in_ds["molecules"]),
+        "metrics": metrics
     }
-
-# -------------------------------------------------------------------
-# ADMET SERVICE
-# -------------------------------------------------------------------
 
 def import_or_run_admet(project_id: str,
                         input_dataset_id: str,
