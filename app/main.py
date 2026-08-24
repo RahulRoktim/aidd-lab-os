@@ -87,6 +87,7 @@ class DockingRequest(BaseModel):
     receptor: Optional[str] = "EGFR Kinase Domain (PDB: 1M17 / 4WKQ)"
     receptor_pdbqt: Optional[str] = None
     prepared_ligands: Optional[list] = None
+    num_modes: Optional[int] = 9
     grid_center: Optional[str] = "x=22.0, y=0.5, z=52.8"
     grid_size: Optional[str] = "20 x 20 x 20 Å"
     center_x: Optional[float] = 22.0
