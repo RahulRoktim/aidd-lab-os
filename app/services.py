@@ -876,7 +876,9 @@ def import_or_run_docking(project_id: str,
                    "seed": seed, "receptor_hash": receptor_hash, "result_origin": result_origin,
                    "center_x": center_x, "center_y": center_y, "center_z": center_z,
                    "size_x": size_x, "size_y": size_y, "size_z": size_z,
-                   "num_modes": num_modes
+                   "num_modes": num_modes,
+                   "receptor_pdbqt": receptor_pdbqt if result_origin == "COMPUTED" else None,
+                   "prepared_ligands": prepared_ligands if result_origin == "COMPUTED" else None
                }),
                json.dumps(metrics), "", "", notes, json.dumps([]), "", start_ts))
 
@@ -1467,12 +1469,22 @@ def reproduce_experiment(experiment_id: str) -> dict:
             experiment_name=new_name,
             docking_tool=params.get("docking_tool", "AutoDock Vina"),
             tool_version=orig_exp["tool_version"],
-            receptor=params.get("receptor_target", "EGFR Kinase Domain"),
+            receptor=params.get("receptor", "EGFR Kinase Domain"),
             grid_center=params.get("grid_center", "x=22.0, y=0.5, z=52.8"),
+            grid_size=params.get("grid_size", "20 x 20 x 20 Å"),
+            center_x=params.get("center_x", 22.0),
+            center_y=params.get("center_y", 0.5),
+            center_z=params.get("center_z", 52.8),
+            size_x=params.get("size_x", 20.0),
+            size_y=params.get("size_y", 20.0),
+            size_z=params.get("size_z", 20.0),
             exhaustiveness=params.get("exhaustiveness", 16),
             seed=params.get("seed", 42),
             result_origin=params.get("result_origin", "IMPORTED"),
-            notes=f"Reproduced from experiment {experiment_id}"
+            notes=f"Reproduced from experiment {experiment_id}",
+            receptor_pdbqt=params.get("receptor_pdbqt"),
+            prepared_ligands=params.get("prepared_ligands"),
+            num_modes=params.get("num_modes", 9)
         )
     elif exp_type == "admet":
         new_exp_res = import_or_run_admet(

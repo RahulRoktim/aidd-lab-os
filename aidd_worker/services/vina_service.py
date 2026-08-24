@@ -182,7 +182,7 @@ def execute_docking_job(job_id: str, request: DockingJobRequest) -> Tuple[List[D
     start_time = time.time()
     total_stdout = []
     total_stderr = []
-    last_exit_code = None
+    native_exit_codes: List[int] = []
 
     for lig in request.ligands:
         lig_id = lig.get("id") or "LIG-001"
@@ -242,7 +242,7 @@ def execute_docking_job(job_id: str, request: DockingJobRequest) -> Tuple[List[D
                 proc = subprocess.run(cmd, capture_output=True, text=True, timeout=config.MAX_DOCKING_TIMEOUT_SECONDS)
                 stdout = proc.stdout
                 stderr = proc.stderr
-                last_exit_code = proc.returncode
+                native_exit_codes.append(proc.returncode)
                 total_stdout.append(f"[{lig_id} STDOUT]\n{stdout}")
                 if stderr:
                     total_stderr.append(f"[{lig_id} STDERR]\n{stderr}")
@@ -339,6 +339,20 @@ def execute_docking_job(job_id: str, request: DockingJobRequest) -> Tuple[List[D
                 })
                 total_stdout.append(f"[{lig_id} NOTICE] Native AutoDock Vina binary not installed. Output generated via verified benchmark fixture.")
 
+    # Preserve a real native failure code if any subprocess failed.  A zero is
+    # only valid when every attempted native subprocess produced a parsed
+    # computed result and the job has no failure records.  Demo/fallback runs,
+    # timeouts, parse failures, and other incomplete executions remain None.
+    aggregate_exit_code = next((code for code in native_exit_codes if code != 0), None)
+    if (
+        aggregate_exit_code is None
+        and native_exit_codes
+        and not failures
+        and len(results) == len(native_exit_codes)
+        and all(result.get("result_origin") == "COMPUTED" for result in results)
+    ):
+        aggregate_exit_code = 0
+
     duration = round(time.time() - start_time, 3)
     meta = {
         "tool": vina_info["version"] or "AutoDock Vina",
@@ -349,7 +363,7 @@ def execute_docking_job(job_id: str, request: DockingJobRequest) -> Tuple[List[D
         "search_box": sb.dict(),
         "exhaustiveness": request.exhaustiveness or 16,
         "seed": request.seed or 42,
-        "exit_code": last_exit_code
+        "exit_code": aggregate_exit_code
     }
 
     return results, failures, artifacts, meta

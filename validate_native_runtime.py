@@ -237,6 +237,9 @@ class NativeValidationHarness:
 
         proof_data = {
             "job_id": res.get("job_id"),
+            "status": res.get("status"),
+            "successful_count": res.get("successful_count", len(results)),
+            "failed_count": res.get("failed_count", len(res.get("failures", []))),
             "molecule_id": m.get("id"),
             "smiles": m.get("smiles"),
             "canonical_smiles": m.get("canonical_smiles"),
@@ -334,7 +337,11 @@ class NativeValidationHarness:
         artifacts = res.get("artifacts", [])
         tool = res.get("tool", "")
 
-        is_native_vina = (res.get("production_ready") is True) and (len(results) > 0) and (results[0].get("result_origin") == "COMPUTED")
+        is_native_vina = (
+            res.get("production_ready") is True
+            and len(results) > 0
+            and all(result.get("result_origin") == "COMPUTED" for result in results)
+        )
 
         vina_data = {
             "job_id": res.get("job_id"),
@@ -344,6 +351,7 @@ class NativeValidationHarness:
             "is_native_vina_executed": is_native_vina,
             "successful_count": len(results),
             "failed_count": len(failures),
+            "exit_code": res.get("exit_code"),
             "best_affinity_kcal_mol": results[0]["best_affinity_kcal_mol"] if results else None,
             "poses_count": len(results[0]["poses"]) if results else 0,
             "output_artifacts_count": len(artifacts),
@@ -352,14 +360,27 @@ class NativeValidationHarness:
             "reproducibility_hash": res.get("reproducibility_hash")
         }
         self.report["vina_proof"] = vina_data
+        native_vina_ok = (
+            vina_data["is_native_vina_executed"] is True
+            and vina_data["status"] == "COMPLETED"
+            and vina_data["exit_code"] == 0
+            and vina_data["successful_count"] > 0
+            and vina_data["failed_count"] == 0
+        )
 
-
-
-        if is_native_vina and vina_data.get('status') == 'COMPLETED' and vina_data.get('exit_code') == 0 and vina_data.get('successful_count', 0) > 0 and vina_data.get('failed_count', 0) == 0:
+        if native_vina_ok:
             self.log('VINA_PROOF', f"Native AutoDock Vina subprocess executed successfully. Best Affinity: {vina_data['best_affinity_kcal_mol']} kcal/mol ({vina_data['poses_count']} poses generated)", 'PASS')
             return True
-        elif results:
+        elif results and not is_native_vina:
             self.log('VINA_PROOF', f"Executed via Vina test fixture/fallback. Score: {results[0].get('docking_score')} kcal/mol [Origin: {results[0].get('result_origin')}]", 'INFO')
+            return False
+        elif results:
+            self.log(
+                "VINA_PROOF",
+                f"Native Vina proof rejected: status={status}, exit_code={vina_data['exit_code']}, "
+                f"successful_count={vina_data['successful_count']}, failed_count={vina_data['failed_count']}",
+                "FAIL"
+            )
             return False
         else:
             self.log('VINA_PROOF', f"Docking failed with {len(failures)} failure records", 'FAIL')
@@ -464,7 +485,8 @@ class NativeValidationHarness:
             self.report["e2e_application_workflow"] = {"success": False}
             return False
 
-        if exp_detail.get("exit_code") != 0 or exp_detail.get("metrics", {}).get("result_origin") != "COMPUTED" or self.report.get("worker_readiness", {}).get("vina_ready") is False:
+        exp_metrics = exp_detail.get("metrics", {})
+        if exp_metrics.get("exit_code") != 0 or exp_metrics.get("result_origin") != "COMPUTED" or self.report.get("worker_readiness", {}).get("vina_ready") is False:
             self.log("APP_E2E", "Experiment result did not indicate successful native computation.", "FAIL")
             self.report["e2e_application_workflow"] = {"success": False}
             return False
@@ -508,6 +530,7 @@ class NativeValidationHarness:
             "docking_experiment_id": dock_exp_id,
             "provenance_nodes": nodes_count,
             "provenance_edges": edges_count,
+            "manifest_exported": True,
             "reproduction_match": rep_match
         }
         return True
@@ -518,7 +541,7 @@ class NativeValidationHarness:
     def compile_report(self, json_path: str = "native_validation_report.json", html_path: str = "native_validation_report.html"):
         w_ready = self.report.get("worker_readiness", {})
 
-        preflight_ok = self.report.get("preflight_checks", {}).get("data_dir_writable", True)
+        preflight_ok = self.report.get("preflight_checks", {}).get("storage_writable", False)
         worker_live_ok = w_ready.get("health") == "OK"
         w_rdk = w_ready.get("rdkit_ready", False)
         w_vina = w_ready.get("vina_ready", False)
@@ -536,23 +559,10 @@ class NativeValidationHarness:
         e2e_succ = e2e.get("success", False)
 
         prov_ok = e2e.get("provenance_edges", 0) > 0
+        manifest_ok = e2e.get("manifest_exported") is True
         repro_ok = e2e.get("reproduction_match") is True
 
-
-        all_mandatory_checks = [
-            preflight_ok,
-            worker_live_ok,
-            w_rdk,
-            w_vina,
-            rdk_proof_ok,
-            rdk_suite_ok,
-            vina_proof_ok,
-            e2e_succ,
-            prov_ok,
-            repro_ok
-        ]
-
-        self.report["mandatory_checks"] = {
+        mandatory_checks = {
             "preflight": preflight_ok,
             "worker_live": worker_live_ok,
             "worker_rdkit": w_rdk,
@@ -562,10 +572,12 @@ class NativeValidationHarness:
             "vina_proof": vina_proof_ok,
             "e2e": e2e_succ,
             "provenance": prov_ok,
+            "manifest_export": manifest_ok,
             "reproduction": repro_ok
         }
+        self.report["mandatory_checks"] = mandatory_checks
 
-        if all(all_mandatory_checks):
+        if all(mandatory_checks.values()):
             overall = "NATIVE_RUNTIME_VERIFIED"
 
         elif e2e_succ or worker_live_ok:
@@ -575,48 +587,25 @@ class NativeValidationHarness:
 
         self.report["overall_status"] = overall
 
-        summary = [
-            {"item": "Pre-flight Environment Check", "status": "PASS" if preflight_ok else "FAIL"},
-            {"item": "Scientific Worker Service Liveness", "status": "PASS" if worker_live_ok else "FAIL"},
-            {"item": "Native RDKit Kernel Execution", "status": "PASS" if rdk_proof_ok else "FAIL"},
-            {"item": "55-Molecule Diversity Benchmark", "status": "PASS" if rdk_suite_ok else "FAIL"},
-            {"item": "Native AutoDock Vina Execution", "status": "PASS" if vina_proof_ok else "FAIL"},
-            {"item": "App ↔ Worker E2E Workflow", "status": "PASS" if e2e_succ else "FAIL"},
-            {"item": "Relational Provenance DAG", "status": "PASS" if prov_ok else "FAIL"},
-            {"item": "Reproducibility Manifest Export", "status": "PASS" if e2e_succ else "FAIL"},
-            {"item": "Automated Experiment Reproduction", "status": "PASS" if repro_ok else "WARN"}
+        summary_items = [
+            ("Pre-flight Environment Check", "preflight"),
+            ("Scientific Worker Service Liveness", "worker_live"),
+            ("Native RDKit Capability", "worker_rdkit"),
+            ("Native AutoDock Vina Capability", "worker_vina"),
+            ("Native RDKit Kernel Execution", "rdkit_proof"),
+            ("55-Molecule Diversity Benchmark", "rdkit_suite"),
+            ("Native AutoDock Vina Execution", "vina_proof"),
+            ("App ↔ Worker E2E Workflow", "e2e"),
+            ("Relational Provenance DAG", "provenance"),
+            ("Reproducibility Manifest Export", "manifest_export"),
+            ("Automated Experiment Reproduction", "reproduction")
         ]
-        self.report["summary_table"] = summary
-
-        # 1. Write JSON Report(self, json_path: str = "native_validation_report.json", html_path: str = "native_validation_report.html"):
-        # Evaluate Overall Status
-        w_rdk = self.report.get("worker_readiness", {}).get("rdkit_ready", False)
-        w_vina = self.report.get("worker_readiness", {}).get("vina_ready", False)
-        e2e_succ = self.report.get("e2e_application_workflow", {}).get("success", False)
-
-
-        if all(all_mandatory_checks):
-            overall = "NATIVE_RUNTIME_VERIFIED"
-        elif e2e_succ or worker_live_ok:
-            overall = "PARTIALLY_VERIFIED"
-        else:
-            overall = "VALIDATION_FAILED"
-
-
-        self.report["overall_status"] = overall
-
-        # Summary Checklist items
         summary = [
-            {"item": "Pre-flight Environment Check", "status": "PASS"},
-            {"item": "Scientific Worker Service Liveness", "status": "PASS" if self.report.get("worker_readiness", {}).get("health") == "OK" else "FAIL"},
-            {"item": "Native RDKit Kernel Execution", "status": "PASS" if w_rdk else "FALLBACK"},
-            {"item": "55-Molecule Diversity Benchmark", "status": "PASS" if self.report.get("rdkit_integration_suite", {}).get("failed_count") == 0 else "FAIL"},
-            {"item": "Native AutoDock Vina Execution", "status": "PASS" if w_vina else "FALLBACK"},
-            {"item": "Receptor/Ligand Benchmark Integrity", "status": "PASS"},
-            {"item": "App ↔ Worker E2E Workflow", "status": "PASS" if e2e_succ else "FAIL"},
-            {"item": "Relational Provenance DAG", "status": "PASS" if self.report.get("e2e_application_workflow", {}).get("provenance_edges", 0) > 0 else "FAIL"},
-            {"item": "Reproducibility Manifest Export", "status": "PASS"},
-            {"item": "Automated Experiment Reproduction", "status": "PASS" if self.report.get("e2e_application_workflow", {}).get("reproduction_match") else "WARN"}
+            {
+                "item": item,
+                "status": "PASS" if mandatory_checks[check_name] else "FAIL"
+            }
+            for item, check_name in summary_items
         ]
         self.report["summary_table"] = summary
 
@@ -632,7 +621,7 @@ class NativeValidationHarness:
         print("\n" + "=" * 80)
         print("AIDD LAB OS — SCIENTIFIC VALIDATION SUMMARY")
         print("=" * 80)
-        for row in summary:
+        for row in self.report["summary_table"]:
             status_color = row["status"]
             print(f"  {row['item']:42} ... {status_color}")
         print("-" * 80)
@@ -754,7 +743,19 @@ class NativeValidationHarness:
 # MAIN ENTRYPOINT
 # -----------------------------------------------------------------------------
 
+def configure_console_output():
+    """Use UTF-8 for the validator's scientific status symbols on Windows."""
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure:
+            try:
+                reconfigure(encoding="utf-8", errors="replace")
+            except (AttributeError, OSError):
+                pass
+
+
 def main():
+    configure_console_output()
     parser = argparse.ArgumentParser(description="AIDD Lab OS — Native Scientific Validation Harness")
     parser.add_argument("--mode", default="AUTO", choices=["AUTO", "DOCKER", "CONDA", "LOCAL"], help="Validation execution mode")
     parser.add_argument("--worker-url", default="http://127.0.0.1:8001", help="AIDD Scientific Worker endpoint")
