@@ -385,7 +385,10 @@ async def run_docking(project_id: str, data: DockingRequest):
             seed=data.seed or 42,
             result_origin=data.result_origin or "IMPORTED",
             custom_scores_csv=data.custom_scores_csv,
-            notes=data.notes or ""
+            notes=data.notes or "",
+            receptor_pdbqt=data.receptor_pdbqt,
+            prepared_ligands=data.prepared_ligands,
+            num_modes=data.num_modes or 9
         )
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
