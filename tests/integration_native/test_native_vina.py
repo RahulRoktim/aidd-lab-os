@@ -10,8 +10,9 @@ import pytest
 sys.path.insert(0, '/working_dir/c_1ed089c83162bf3c/aidd_lab_os')
 
 from aidd_worker.services.capability_service import detect_vina
+from aidd_worker.models import DockingJobRequest, SearchBoxConfig
 from aidd_worker.services.vina_service import (
-    execute_docking_job, DockingJobRequest, SearchBoxConfig,
+    execute_docking_job,
     EGFR_4WKQ_RECEPTOR_PDBQT, ERLOTINIB_LIGAND_PDBQT
 )
 
@@ -35,3 +36,5 @@ def test_native_vina_docking_subprocess():
     assert len(results) == 1
     assert results[0]["result_origin"] == "COMPUTED"
     assert results[0]["docking_score"] < 0.0
+    assert failures == []
+    assert meta["exit_code"] == 0

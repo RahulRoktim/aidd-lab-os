@@ -124,7 +124,7 @@ class JobResult(BaseModel):
     results: Optional[List[Dict[str, Any]]] = None
     stdout: Optional[str] = ""
     stderr: Optional[str] = ""
-    exit_code: Optional[int] = 0
+    exit_code: Optional[int] = None
     failure_reason: Optional[str] = None
     reproducibility_hash: str = ""
 

@@ -85,6 +85,9 @@ class DockingRequest(BaseModel):
     docking_tool: Optional[str] = "AutoDock Vina"
     tool_version: Optional[str] = "1.2.5"
     receptor: Optional[str] = "EGFR Kinase Domain (PDB: 1M17 / 4WKQ)"
+    receptor_pdbqt: Optional[str] = None
+    prepared_ligands: Optional[list] = None
+    num_modes: Optional[int] = 9
     grid_center: Optional[str] = "x=22.0, y=0.5, z=52.8"
     grid_size: Optional[str] = "20 x 20 x 20 Å"
     center_x: Optional[float] = 22.0
@@ -382,7 +385,10 @@ async def run_docking(project_id: str, data: DockingRequest):
             seed=data.seed or 42,
             result_origin=data.result_origin or "IMPORTED",
             custom_scores_csv=data.custom_scores_csv,
-            notes=data.notes or ""
+            notes=data.notes or "",
+            receptor_pdbqt=data.receptor_pdbqt,
+            prepared_ligands=data.prepared_ligands,
+            num_modes=data.num_modes or 9
         )
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))

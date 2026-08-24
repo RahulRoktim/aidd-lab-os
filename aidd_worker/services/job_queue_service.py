@@ -306,6 +306,7 @@ def run_docking_job(request: DockingJobRequest) -> JobResult:
             job.results = results
             job.stdout = meta.get("stdout", "")
             job.stderr = meta.get("stderr", "")
+            job.exit_code = meta.get("exit_code")
             job.metrics = {
                 "ligands_docked": len(results),
                 "best_affinity_kcal_mol": min([r["best_affinity_kcal_mol"] for r in results]) if results else 0.0,
