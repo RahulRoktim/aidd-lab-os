@@ -38,3 +38,7 @@ def test_native_vina_docking_subprocess():
     assert results[0]["docking_score"] < 0.0
     assert failures == []
     assert meta["exit_code"] == 0
+    assert meta["vina_identity_verified"] is True
+    assert meta["vina_binary_sha256"]
+    assert results[0]["output_pdbqt_hash"]
+    assert results[0]["tool_version"] == vina_info["version"]

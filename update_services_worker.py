@@ -20,7 +20,7 @@ old_env_func = """def get_system_environment_info() -> dict:
         "has_native_rdkit": engine_status["has_rdkit"],
         "rdkit_version": engine_status["rdkit_version"],
         "engine_notice": engine_status["engine_notice"],
-        "hardware": "x86_64 High-Performance Compute Cluster"
+        "hardware": platform.machine()
     }"""
 
 new_env_func = """def get_system_environment_info() -> dict:
@@ -43,7 +43,7 @@ new_env_func = """def get_system_environment_info() -> dict:
             "status": worker_st["status"],
             "capabilities": worker_st.get("scientific_software", {})
         },
-        "hardware": "x86_64 High-Performance Compute Cluster"
+        "hardware": platform.machine()
     }"""
 
 if old_env_func in code:

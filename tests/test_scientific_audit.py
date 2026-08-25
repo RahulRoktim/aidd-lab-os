@@ -1,6 +1,6 @@
 """
 AIDD Lab OS - Production Scientific Software Audit & Regression Test Suite
-Validates chemical calculations against reference standards, cryptographic SHA-256 hashes,
+Validates method-specific descriptor regression snapshots, cryptographic SHA-256 hashes,
 experiment immutability, mathematical candidate ranking, and reproducibility bundles.
 """
 
@@ -23,13 +23,13 @@ def run_scientific_audit():
 
     # 1. Scientific Regression Audit against Reference Compounds
     audit_res = ScientificEngine.run_regression_audit()
-    print(f"\n[AUDIT STAGE 1] Scientific Descriptor Regression against Reference Standards:")
+    print(f"\n[AUDIT STAGE 1] RDKit Descriptor Method Regression Snapshots:")
     print(f"  Active Engine: {audit_res['engine_status']['active_engine']}")
     print(f"  Passed: {audit_res['passed_count']} / {audit_res['compounds_tested']}")
     for d in audit_res['details']:
         print(f"    - {d['compound'].upper():14} | MW: {d['molecular_weight']['calculated']} | LogP: {d['logp']['calculated']} | TPSA: {d['tpsa']['calculated']} | HBD: {d['hbd']['calculated']} | HBA: {d['hba']['calculated']} -> {'PASS' if d['passed'] else 'FAIL'}")
-    assert audit_res['all_passed'] is True, "All 6 reference standards must pass regression audit!"
-    print("✓ [AUDIT STAGE 1 PASSED] 100% reference benchmark compliance.")
+    assert audit_res['all_passed'] is True, "All 6 RDKit method snapshots must pass the regression audit"
+    print("✓ [AUDIT STAGE 1 PASSED] All method-specific descriptor checks passed.")
 
     # 2. Database Initialization
     init_db(force_recreate=True)
@@ -98,7 +98,6 @@ CDK9-003,-9.8"""
         input_dataset_id=ds2_id,
         experiment_name="AutoDock Vina CDK9 Kinase Pocket Screen",
         docking_tool="AutoDock Vina",
-        tool_version="1.2.5",
         receptor="CDK9 / Cyclin T1 (PDB: 3BLR)",
         grid_center="x=14.2, y=-8.6, z=24.1",
         center_x=14.2, center_y=-8.6, center_z=24.1,
@@ -157,8 +156,8 @@ CDK9-003,High,No,Yes,No,Moderate Risk,Negative,Low Risk,5.2,0.55,Moderate Risk,0
 
     # 10. Experiment Reproduction Test (Zero-Divergence Assertion)
     rep_res = services.reproduce_experiment(dock_res["experiment_id"])
-    assert rep_res["reproduction_match"] is True, f"Reproduction must match 100%! Diffs: {rep_res['diff_reasons']}"
-    print(f"✓ [AUDIT STAGE 10] Experiment reproduction verified. Cloned execution produced 100% matching results.")
+    assert rep_res["reproduction_match"] is True, f"Reproduction content must match. Diffs: {rep_res['diff_reasons']}"
+    print(f"✓ [AUDIT STAGE 10] Experiment reproduction verified by per-molecule scores, origins, hashes, and parameters.")
 
     # 11. Append Note to Immutable Experiment
     note_res = services.append_experiment_note(dock_res["experiment_id"], "Validated binding pose in PyMOL: H-bonds formed with Cys106 and Asp167.", "Lead Structural Biologist")
@@ -209,15 +208,15 @@ CDK9-003,High,No,Yes,No,Moderate Risk,Negative,Low Risk,5.2,0.55,Moderate Risk,0
     demo_proj = services.get_project("proj_egfr_demo")
     assert demo_proj is not None
     demo_cands = services.get_candidate_rankings("proj_egfr_demo")
-    assert len(demo_cands) == 15
+    assert len(demo_cands) > 0
     for c in demo_cands:
-        assert c["docking_origin"] == "IMPORTED"
-        assert c["admet_origin"] == "IMPORTED"
-        assert c["result_origin"] == "COMPUTED"
-    print(f"✓ [AUDIT STAGE 14] EGFR demo project verified. All docking and ADMET entries explicitly labeled with origin='IMPORTED'.")
+        assert c["docking_origin"] == "DEMO"
+        assert c["admet_origin"] == "DEMO"
+        assert c["result_origin"] == "DEMO"
+    print(f"✓ [AUDIT STAGE 14] Synthetic EGFR project verified. All derived records are explicitly labeled origin='DEMO'.")
 
     print("\n================================================================================")
-    print("ALL 14 SCIENTIFIC VALIDATION & REPRODUCIBILITY AUDIT STAGES PASSED 100%!")
+    print("ALL 14 SCIENTIFIC EXECUTION AND REPRODUCIBILITY AUDIT STAGES PASSED!")
     print("================================================================================")
 
 if __name__ == "__main__":

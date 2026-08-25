@@ -132,6 +132,7 @@ class ReadinessResponse(BaseModel):
     status: str  # "READY", "DEGRADED", "UNAVAILABLE"
     health: str  # "OK"
     worker_version: str = "1.4.0"
+    worker_id: str
     api_version: str
     rdkit_ready: bool
     rdkit_version: Optional[str] = None
@@ -139,6 +140,9 @@ class ReadinessResponse(BaseModel):
     vina_ready: bool
     vina_version: Optional[str] = None
     vina_path: Optional[str] = None
+    vina_identity_verified: bool = False
+    vina_binary_sha256: Optional[str] = None
+    vina_version_output_sha256: Optional[str] = None
     openbabel_ready: bool
     environment_sha256: str
     diagnostics: Dict[str, Any]

@@ -17,6 +17,7 @@ import subprocess
 import platform
 import argparse
 import hashlib
+import html
 from datetime import datetime, timezone
 from typing import Dict, Any, List, Tuple, Optional
 
@@ -263,8 +264,8 @@ class NativeValidationHarness:
             self.log("RDKIT_PROOF", f"Native RDKit executed successfully. Formula: {m.get('formula')}, MW: {m.get('molecular_weight')} Da, LogP: {m.get('logp')}, Origin: {origin}", "PASS")
             return True
         else:
-            self.log("RDKIT_PROOF", f"Executed via fallback engine: '{engine}' (Production Ready: {prod_ready})", "INFO")
-            return True
+            self.log("RDKIT_PROOF", f"Native proof rejected: engine='{engine}', production_ready={prod_ready}, origin={origin}", "FAIL")
+            return False
 
     # -------------------------------------------------------------------------
     # STAGE 4: 55-MOLECULE RDKIT DIVERSITY & REFERENCE AGREEMENT SUITE
@@ -284,21 +285,25 @@ class NativeValidationHarness:
         cats = res.get("categories_tested", 0)
         engine = res.get("engine", "")
 
-        self.log("RDKIT_SUITE", f"Processed {passed}/{total} diverse chemical structures across {cats} categories ({engine})", "PASS" if failed == 0 else "FAIL")
-        return failed == 0
+        native_suite = bool(
+            failed == 0
+            and res.get("production_ready") is True
+            and all(sample.get("result_origin") == "COMPUTED" for sample in res.get("sample_results", []))
+        )
+        self.log("RDKIT_SUITE", f"Processed {passed}/{total} diverse chemical structures across {cats} categories ({engine})", "PASS" if native_suite else "FAIL")
+        return native_suite
 
     # -------------------------------------------------------------------------
     # STAGE 5: NATIVE AUTODOCK VINA EXECUTION PROOF
     # -------------------------------------------------------------------------
     def run_native_vina_proof(self) -> bool:
-        self.log("VINA_PROOF", "Executing AutoDock Vina structure-based docking integration test...", "INFO")
+        self.log("VINA_PROOF", "Executing native AutoDock Vina subprocess smoke test with synthetic plumbing fixtures...", "INFO")
         
-        # Load documented benchmark assets (1HSG or 4WKQ)
-        rec_path = os.path.join(BASE_DIR, "benchmark_assets", "4wkq_receptor.pdbqt")
-        lig_path = os.path.join(BASE_DIR, "benchmark_assets", "erlotinib_ligand.pdbqt")
+        rec_path = os.path.join(BASE_DIR, "benchmark_assets", "synthetic_4wkq_receptor_fixture.pdbqt")
+        lig_path = os.path.join(BASE_DIR, "benchmark_assets", "synthetic_erlotinib_ligand_fixture.pdbqt")
 
         if not os.path.exists(rec_path) or not os.path.exists(lig_path):
-            self.log("VINA_PROOF", "Benchmark PDBQT assets missing from benchmark_assets/", "FAIL")
+            self.log("VINA_PROOF", "Synthetic PDBQT plumbing fixtures are missing from benchmark_assets/", "FAIL")
             return False
 
         with open(rec_path, 'r', encoding='utf-8') as f:
@@ -308,8 +313,8 @@ class NativeValidationHarness:
 
         payload = {
             "receptor_pdbqt": rec_content,
-            "receptor_name": "EGFR Kinase Domain (PDB: 4WKQ)",
-            "ligands": [{"id": "LIG-ERL-VAL", "name": "Erlotinib Ligand Fragment", "pdbqt": lig_content}],
+            "receptor_name": "Synthetic receptor fixture B",
+            "ligands": [{"id": "LIG-FIXTURE-B", "name": "Synthetic ligand fixture B", "pdbqt": lig_content}],
             "search_box": {
                 "center_x": 22.4,
                 "center_y": 0.8,
@@ -322,7 +327,7 @@ class NativeValidationHarness:
             "num_modes": 5,
             "seed": 42,
             "experiment_id": "exp_vina_proof_val",
-            "execution_mode": "DEMO_FALLBACK" if not self.report.get("worker_readiness", {}).get("vina_ready") else "NATIVE"
+            "execution_mode": "NATIVE"
         }
 
         succ, res = http_post(f"{self.worker_url}/jobs/docking", payload, timeout=120.0)
@@ -336,17 +341,47 @@ class NativeValidationHarness:
         failures = res.get("failures", [])
         artifacts = res.get("artifacts", [])
         tool = res.get("tool", "")
+        tool_version = res.get("tool_version")
+        metrics = res.get("metrics", {})
+        readiness = self.report.get("worker_readiness", {})
+        output_artifacts = [
+            artifact for artifact in artifacts
+            if artifact.get("file_type") == "pdbqt_output" and artifact.get("size_bytes", 0) > 0 and artifact.get("sha256_hash")
+        ]
 
         is_native_vina = (
-            res.get("production_ready") is True
+            status == "COMPLETED"
+            and res.get("exit_code") == 0
+            and res.get("production_ready") is True
+            and res.get("execution_mode") == "NATIVE"
+            and tool == "AutoDock Vina"
+            and isinstance(tool_version, str)
+            and tool_version.lower().startswith("autodock vina")
+            and readiness.get("vina_identity_verified") is True
+            and metrics.get("vina_identity_verified") is True
+            and metrics.get("vina_binary_sha256")
+            and metrics.get("vina_binary_sha256") == readiness.get("vina_binary_sha256")
             and len(results) > 0
-            and all(result.get("result_origin") == "COMPUTED" for result in results)
+            and not failures
+            and len(output_artifacts) == len(results)
+            and all(
+                result.get("result_origin") == "COMPUTED"
+                and result.get("tool") == "AutoDock Vina"
+                and result.get("tool_version") == tool_version
+                and result.get("vina_binary_sha256") == metrics.get("vina_binary_sha256")
+                and result.get("output_pdbqt_hash") in {artifact["sha256_hash"] for artifact in output_artifacts}
+                and result.get("receptor_hash")
+                and result.get("ligand_hash")
+                for result in results
+            )
         )
 
         vina_data = {
             "job_id": res.get("job_id"),
             "status": status,
             "tool": tool,
+            "tool_version": tool_version,
+            "worker_id": res.get("worker_id"),
             "production_ready": res.get("production_ready"),
             "is_native_vina_executed": is_native_vina,
             "successful_count": len(results),
@@ -357,7 +392,14 @@ class NativeValidationHarness:
             "output_artifacts_count": len(artifacts),
             "stdout_captured": bool(res.get("stdout")),
             "stderr_captured": bool(res.get("stderr")),
-            "reproducibility_hash": res.get("reproducibility_hash")
+            "stdout_sha256": metrics.get("stdout_sha256"),
+            "vina_binary_sha256": metrics.get("vina_binary_sha256"),
+            "vina_version_output_sha256": metrics.get("vina_version_output_sha256"),
+            "output_pdbqt_hashes": metrics.get("output_pdbqt_hashes", []),
+            "reproducibility_hash": res.get("reproducibility_hash"),
+            "fixture_class": "SYNTHETIC_PLUMBING_FIXTURE",
+            "fixture_search_box": payload["search_box"],
+            "scientific_validation": False,
         }
         self.report["vina_proof"] = vina_data
         native_vina_ok = (
@@ -441,10 +483,10 @@ class NativeValidationHarness:
 
 
         # 4. Docking Screen
-        rec_path = os.path.join(BASE_DIR, "benchmark_assets", "4wkq_receptor.pdbqt")
-        lig_path = os.path.join(BASE_DIR, "benchmark_assets", "erlotinib_ligand.pdbqt")
+        rec_path = os.path.join(BASE_DIR, "benchmark_assets", "synthetic_4wkq_receptor_fixture.pdbqt")
+        lig_path = os.path.join(BASE_DIR, "benchmark_assets", "synthetic_erlotinib_ligand_fixture.pdbqt")
         if not os.path.exists(rec_path) or not os.path.exists(lig_path):
-            self.log("APP_E2E", "Benchmark PDBQT assets missing from benchmark_assets/", "FAIL")
+            self.log("APP_E2E", "Synthetic PDBQT plumbing fixtures are missing from benchmark_assets/", "FAIL")
             self.report["e2e_application_workflow"] = {"success": False}
             return False
 
@@ -456,7 +498,7 @@ class NativeValidationHarness:
         dock_payload = {
             "input_dataset_id": ds2_id,
             "experiment_name": "AutoDock Vina Kinase Domain Screen",
-            "receptor": "EGFR Kinase Domain (PDB: 4WKQ)",
+            "receptor": "Synthetic receptor fixture B",
             "center_x": 22.4,
             "center_y": 0.8,
             "center_z": 52.5,
@@ -486,7 +528,21 @@ class NativeValidationHarness:
             return False
 
         exp_metrics = exp_detail.get("metrics", {})
-        if exp_metrics.get("exit_code") != 0 or exp_metrics.get("result_origin") != "COMPUTED" or self.report.get("worker_readiness", {}).get("vina_ready") is False:
+        strict_app_attestation = bool(
+            exp_metrics.get("exit_code") == 0
+            and exp_metrics.get("result_origin") == "COMPUTED"
+            and exp_metrics.get("is_native_vina_executed") is True
+            and exp_metrics.get("tool") == "AutoDock Vina"
+            and isinstance(exp_metrics.get("tool_version"), str)
+            and exp_metrics.get("tool_version", "").lower().startswith("autodock vina")
+            and exp_metrics.get("worker_id")
+            and exp_metrics.get("vina_binary_sha256")
+            and exp_metrics.get("stdout_sha256")
+            and exp_metrics.get("output_pdbqt_hashes")
+            and self.report.get("worker_readiness", {}).get("vina_identity_verified") is True
+            and exp_metrics.get("vina_binary_sha256") == self.report.get("worker_readiness", {}).get("vina_binary_sha256")
+        )
+        if not strict_app_attestation:
             self.log("APP_E2E", "Experiment result did not indicate successful native computation.", "FAIL")
             self.report["e2e_application_workflow"] = {"success": False}
             return False
@@ -508,7 +564,7 @@ class NativeValidationHarness:
         if not succ or not manifest:
             self.log("APP_E2E", "Could not generate experiment reproducibility manifest", "FAIL")
             return False
-        self.log("APP_E2E", f"Reproducibility manifest generated: Tool={manifest['tooling']['tool']} v{manifest['tooling']['version']}", "PASS")
+        self.log("APP_E2E", f"Reproducibility manifest generated: Tool={manifest['tooling']['tool']} | Version={manifest['tooling']['version']}", "PASS")
 
         # 7. Reproduction Test
         succ, rep_res = http_post(f"{self.app_url}/api/experiments/{dock_exp_id}/reproduce", {}, timeout=30.0)
@@ -531,26 +587,49 @@ class NativeValidationHarness:
             "provenance_nodes": nodes_count,
             "provenance_edges": edges_count,
             "manifest_exported": True,
-            "reproduction_match": rep_match
+            "reproduction_match": rep_match,
+            "reproduction_diff_reasons": rep_res.get("diff_reasons", []),
+            "native_attestation": {
+                "worker_id": exp_metrics.get("worker_id"),
+                "tool": exp_metrics.get("tool"),
+                "tool_version": exp_metrics.get("tool_version"),
+                "exit_code": exp_metrics.get("exit_code"),
+                "vina_binary_sha256": exp_metrics.get("vina_binary_sha256"),
+                "stdout_sha256": exp_metrics.get("stdout_sha256"),
+                "output_pdbqt_hashes": exp_metrics.get("output_pdbqt_hashes"),
+            },
         }
         return True
 
     # -------------------------------------------------------------------------
     # STAGE 7: COMPILE AND WRITE VALIDATION REPORT
     # -------------------------------------------------------------------------
-    def compile_report(self, json_path: str = "native_validation_report.json", html_path: str = "native_validation_report.html"):
+    def compile_report(self, json_path: str = "native_validation_report.json", html_path: str = "native_validation_report.html") -> bool:
         w_ready = self.report.get("worker_readiness", {})
 
         preflight_ok = self.report.get("preflight_checks", {}).get("storage_writable", False)
         worker_live_ok = w_ready.get("health") == "OK"
         w_rdk = w_ready.get("rdkit_ready", False)
-        w_vina = w_ready.get("vina_ready", False)
+        w_vina = bool(
+            w_ready.get("vina_ready") is True
+            and w_ready.get("vina_identity_verified") is True
+            and isinstance(w_ready.get("vina_version"), str)
+            and w_ready.get("vina_version", "").lower().startswith("autodock vina")
+            and w_ready.get("vina_binary_sha256")
+            and w_ready.get("vina_version_output_sha256")
+        )
 
         rdk_proof = self.report.get("rdkit_proof", {})
         rdk_proof_ok = rdk_proof.get("is_native_rdkit") is True and rdk_proof.get("status") == "COMPLETED"
 
         rdk_suite = self.report.get("rdkit_integration_suite", {})
-        rdk_suite_ok = rdk_suite.get("validation_passed") is True and rdk_suite.get("successful_count") == 55 and rdk_suite.get("failed_count") == 0
+        rdk_suite_ok = bool(
+            rdk_suite.get("validation_passed") is True
+            and rdk_suite.get("production_ready") is True
+            and rdk_suite.get("successful_count") == 55
+            and rdk_suite.get("failed_count") == 0
+            and all(sample.get("result_origin") == "COMPUTED" for sample in rdk_suite.get("sample_results", []))
+        )
 
         vina_proof = self.report.get("vina_proof", {})
         vina_proof_ok = vina_proof.get("is_native_vina_executed") is True and vina_proof.get("status") == "COMPLETED" and vina_proof.get("successful_count", 0) > 0 and vina_proof.get("failed_count", 0) == 0 and vina_proof.get("exit_code") == 0
@@ -630,6 +709,7 @@ class NativeValidationHarness:
         print(f"  JSON Audit Report: {os.path.abspath(json_path)}")
         print(f"  HTML Visual Report: {os.path.abspath(html_path)}")
         print("=" * 80)
+        return overall == "NATIVE_RUNTIME_VERIFIED"
 
     def render_html_report(self) -> str:
         rep = self.report
@@ -639,11 +719,25 @@ class NativeValidationHarness:
         vina = rep.get("vina_proof", {})
         e2e = rep.get("e2e_application_workflow", {})
         overall = rep["overall_status"]
+        mandatory = rep.get("mandatory_checks", {})
+
+        def shown(value: Any) -> str:
+            if value is None or value == "":
+                return "MISSING"
+            return html.escape(str(value))
+
+        box = vina.get("fixture_search_box") or {}
+        box_text = (
+            f"center=({shown(box.get('center_x'))}, {shown(box.get('center_y'))}, {shown(box.get('center_z'))}), "
+            f"size=({shown(box.get('size_x'))}, {shown(box.get('size_y'))}, {shown(box.get('size_z'))})"
+            if box else "MISSING"
+        )
 
         color_map = {
             "NATIVE_RUNTIME_VERIFIED": "#10B981",
             "PARTIALLY_VERIFIED": "#F59E0B",
-            "NOT_VERIFIED": "#EF4444"
+            "NOT_VERIFIED": "#EF4444",
+            "VALIDATION_FAILED": "#EF4444",
         }
         theme_color = color_map.get(overall, "#38BDF8")
 
@@ -697,7 +791,7 @@ class NativeValidationHarness:
             </div>
             <div class="stat-card">
                 <div style="font-size: 11px; color: #94A3B8; text-transform: uppercase;">Environment Fingerprint (SHA-256)</div>
-                <div style="margin-top: 4px;"><code style="font-size: 11px;">{rep.get('environment_fingerprint', 'N/A')[:24]}...</code></div>
+                <div style="margin-top: 4px;"><code style="font-size: 11px;">{shown(rep.get('environment_fingerprint'))}</code></div>
                 <div style="font-size: 11px; color: #64748B; margin-top: 2px;">Captures OS, Python runtime, compiler, RDKit, and Vina versions</div>
             </div>
         </div>
@@ -710,30 +804,31 @@ class NativeValidationHarness:
 
         <h2>2. RDKit Scientific Kernel Execution</h2>
         <table>
-            <tr><td style="width: 35%;">RDKit Native Readiness</td><td><b>{'READY (C++ Native Kernel)' if w.get('rdkit_ready') else 'NOT INSTALLED (Pure-Python Reference Engine Active)'}</b></td></tr>
-            <tr><td>Aspirin MW & Formula Proof</td><td><code>{rdk.get('formula', 'C9H8O4')}</code> ({rdk.get('molecular_weight', 180.16)} Da, LogP: {rdk.get('logp', 1.39)})</td></tr>
-            <tr><td>Origin Attribution</td><td><span class="badge badge-pass">{rdk.get('result_origin', 'COMPUTED')}</span></td></tr>
-            <tr><td>55-Molecule Diversity Benchmark</td><td><b>{rep.get('rdkit_integration_suite', {}).get('successful_count', 0)} / {rep.get('rdkit_integration_suite', {}).get('total_compounds_tested', 0)} Compounds Passed</b> (14 Chemical Classes)</td></tr>
+            <tr><td style="width: 35%;">RDKit Native Readiness</td><td><span class="badge badge-{'pass' if mandatory.get('worker_rdkit') else 'fail'}">{'PASS' if mandatory.get('worker_rdkit') else 'FAIL'}</span></td></tr>
+            <tr><td>Aspirin MW & Formula Proof</td><td><code>{shown(rdk.get('formula'))}</code> ({shown(rdk.get('molecular_weight'))} Da, LogP: {shown(rdk.get('logp'))})</td></tr>
+            <tr><td>Origin Attribution</td><td><span class="badge badge-{'pass' if mandatory.get('rdkit_proof') else 'fail'}">{shown(rdk.get('result_origin'))}</span></td></tr>
+            <tr><td>55-Molecule Native Execution Suite</td><td><b>{shown(rep.get('rdkit_integration_suite', {}).get('successful_count'))} / {shown(rep.get('rdkit_integration_suite', {}).get('total_compounds_tested'))}</b> across {shown(rep.get('rdkit_integration_suite', {}).get('categories_tested'))} categories — <span class="badge badge-{'pass' if mandatory.get('rdkit_suite') else 'fail'}">{'PASS' if mandatory.get('rdkit_suite') else 'FAIL'}</span></td></tr>
         </table>
 
         <h2>3. AutoDock Vina Docking Execution</h2>
         <table>
-            <tr><td style="width: 35%;">Vina Native Readiness</td><td><b>{'READY (Subprocess Execution Verified)' if w.get('vina_ready') else 'UNAVAILABLE (PATH Lookup Empty / Fallback Mode)'}</b></td></tr>
-            <tr><td>Benchmark Protein-Ligand System</td><td>EGFR Kinase Domain ATP Pocket (PDB: 4WKQ) & HIV-1 Protease (1HSG)</td></tr>
-            <tr><td>Documented Search Box</td><td><code>center=(22.4, 0.8, 52.5), size=(20, 20, 20 Å)</code></td></tr>
-            <tr><td>Output PDBQT & Affinity</td><td>{vina.get('best_affinity_kcal_mol', 'N/A')} kcal/mol ({vina.get('poses_count', 0)} modes generated)</td></tr>
+            <tr><td style="width: 35%;">Vina Native Readiness</td><td><span class="badge badge-{'pass' if mandatory.get('worker_vina') else 'fail'}">{'PASS' if mandatory.get('worker_vina') else 'FAIL'}</span></td></tr>
+            <tr><td>Executable Identity</td><td>{shown(vina.get('tool'))} / {shown(vina.get('tool_version'))}<br><code>{shown(vina.get('vina_binary_sha256'))}</code></td></tr>
+            <tr><td>Test Asset Class</td><td>{shown(vina.get('fixture_class'))} — native execution smoke test only; not scientific validation</td></tr>
+            <tr><td>Fixture Search Box</td><td><code>{box_text}</code></td></tr>
+            <tr><td>Output PDBQT & Affinity</td><td>{shown(vina.get('best_affinity_kcal_mol'))} kcal/mol ({shown(vina.get('poses_count'))} modes) — <span class="badge badge-{'pass' if mandatory.get('vina_proof') else 'fail'}">{'PASS' if mandatory.get('vina_proof') else 'FAIL'}</span></td></tr>
         </table>
 
         <h2>4. Main Application ↔ Worker Integration</h2>
         <table>
-            <tr><td style="width: 35%;">Validation Project</td><td><code>{e2e.get('project_id', 'N/A')}</code></td></tr>
-            <tr><td>Datasets & Immutability</td><td>{e2e.get('datasets_created', 0)} snapshots created with SHA-256 hashes</td></tr>
-            <tr><td>Relational Provenance DAG</td><td>{e2e.get('provenance_nodes', 0)} nodes, {e2e.get('provenance_edges', 0)} edges verified</td></tr>
-            <tr><td>Experiment Reproduction</td><td>{'100% Metric Equality' if e2e.get('reproduction_match') else 'Reproduction recorded'}</td></tr>
+            <tr><td style="width: 35%;">Validation Project</td><td><code>{shown(e2e.get('project_id'))}</code></td></tr>
+            <tr><td>Datasets & Immutability</td><td>{shown(e2e.get('datasets_created'))} snapshots reported</td></tr>
+            <tr><td>Relational Provenance DAG</td><td>{shown(e2e.get('provenance_nodes'))} nodes, {shown(e2e.get('provenance_edges'))} edges — <span class="badge badge-{'pass' if mandatory.get('provenance') else 'fail'}">{'PASS' if mandatory.get('provenance') else 'FAIL'}</span></td></tr>
+            <tr><td>Experiment Reproduction</td><td><span class="badge badge-{'pass' if mandatory.get('reproduction') else 'fail'}">{'PASS' if mandatory.get('reproduction') else 'FAIL'}</span> {shown(e2e.get('reproduction_diff_reasons')) if not mandatory.get('reproduction') else ''}</td></tr>
         </table>
 
         <div style="margin-top: 30px; font-size: 11px; color: #64748B; text-align: center; border-top: 1px solid #1E293B; padding-top: 16px;">
-            AIDD Lab OS Scientific Validation Framework • Ground-Truth Provenance & Reproducibility Certified.
+            AIDD Lab OS runtime evidence report. A verified verdict requires every mandatory check above to pass.
         </div>
     </div>
 </body>
@@ -754,7 +849,7 @@ def configure_console_output():
                 pass
 
 
-def main():
+def main(argv: Optional[List[str]] = None) -> int:
     configure_console_output()
     parser = argparse.ArgumentParser(description="AIDD Lab OS — Native Scientific Validation Harness")
     parser.add_argument("--mode", default="AUTO", choices=["AUTO", "DOCKER", "CONDA", "LOCAL"], help="Validation execution mode")
@@ -764,7 +859,7 @@ def main():
     parser.add_argument("--output-html", default="native_validation_report.html", help="Path to write HTML validation report")
     parser.add_argument("--cleanup", action="store_true", help="Clean up validation projects after completion")
 
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
 
     print("=" * 80)
     print("AIDD LAB OS — NATIVE SCIENTIFIC VALIDATION HARNESS (v1.4.0)")
@@ -797,7 +892,8 @@ def main():
         harness.run_e2e_application_workflow()
 
     # 7. Compile Report
-    harness.compile_report(json_path=args.output_json, html_path=args.output_html)
+    verified = harness.compile_report(json_path=args.output_json, html_path=args.output_html)
+    return 0 if verified else 1
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

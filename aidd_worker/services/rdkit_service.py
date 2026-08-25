@@ -227,7 +227,7 @@ def calculate_descriptors_batch(molecules: List[MoleculeInput]) -> Tuple[List[di
                 "fingerprint": fp,
                 "engine": "AIDD Python Reference Engine (Non-Production Fallback)",
                 "production_ready": False,
-                "result_origin": "COMPUTED"
+                "result_origin": "SIMULATED"
             })
 
     meta = {
@@ -278,7 +278,8 @@ def standardize_molecules_batch(molecules: List[MoleculeInput], remove_salts: bo
                     "was_modified": smiles != canonical_smi,
                     "warnings": warnings,
                     "engine": f"RDKit v{rdkit_info['version']}",
-                    "production_ready": True
+                    "production_ready": True,
+                    "result_origin": "COMPUTED"
                 })
             except Exception as e:
                 failures.append(FailureRecord(molecule_id=m.id, molecule_name=m.name, smiles=smiles, error_type="RDKitStandardizationException", error_message=str(e)))
@@ -297,7 +298,8 @@ def standardize_molecules_batch(molecules: List[MoleculeInput], remove_salts: bo
                 "was_modified": std_res["was_modified"],
                 "warnings": std_res["warnings"],
                 "engine": "AIDD Python Reference Engine (Non-Production Fallback)",
-                "production_ready": False
+                "production_ready": False,
+                "result_origin": "SIMULATED"
             })
 
     meta = {

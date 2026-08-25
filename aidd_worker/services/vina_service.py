@@ -6,6 +6,8 @@ import os
 import re
 import time
 import subprocess
+import hashlib
+import json
 from typing import Dict, Any, List, Tuple, Optional
 
 from aidd_worker import config
@@ -13,9 +15,10 @@ from aidd_worker.models import DockingJobRequest, FailureRecord, ArtifactInfo
 from aidd_worker.services.capability_service import detect_vina
 from aidd_worker.services.artifact_service import save_job_artifact, compute_sha256
 
-# Documented Test Receptor PDBQT (EGFR Kinase Domain PDB: 4WKQ Active Site Fragment)
+# Synthetic receptor-shaped PDBQT fixture for plumbing tests only.  It is not a
+# complete structure from PDB 4WKQ and is not scientific validation material.
 EGFR_4WKQ_RECEPTOR_PDBQT = """REMARK  NAME = EGFR_4WKQ_POCKET
-REMARK  TARGET = EGFR Kinase Domain (ATP Binding Pocket)
+REMARK  ASSET_CLASS = SYNTHETIC_PLUMBING_FIXTURE
 ATOM      1  N   MET A 793      22.140   1.210  51.840  1.00 20.00    -0.350 N 
 ATOM      2  CA  MET A 793      22.850   0.450  52.880  1.00 20.00     0.100 C 
 ATOM      3  C   MET A 793      24.320   0.880  52.950  1.00 20.00     0.550 C 
@@ -34,8 +37,9 @@ ATOM     15  OD2 ASP A 855      28.320  -1.020  46.650  1.00 20.00    -0.800 OA
 TER
 """
 
-# Documented Test Ligand PDBQT (Erlotinib Fragment PDBQT)
+# Synthetic ligand-shaped PDBQT fixture for plumbing tests only.
 ERLOTINIB_LIGAND_PDBQT = """REMARK  NAME = Erlotinib_Ligand
+REMARK  ASSET_CLASS = SYNTHETIC_PLUMBING_FIXTURE
 ROOT
 ATOM      1  C1  UNL     1      22.450   0.620  52.150  1.00  0.00     0.050 C 
 ATOM      2  C2  UNL     1      23.120   1.750  52.650  1.00  0.00     0.120 A 
@@ -49,8 +53,9 @@ ENDROOT
 TORSDOF 4
 """
 
-# Documented HIV-1 Protease Receptor & Indinavir System (PDB: 1HSG)
+# Synthetic receptor-shaped fixture; not a complete 1HSG structure.
 HIV_1HSG_RECEPTOR_PDBQT = """REMARK  NAME = HIV1_Protease_1HSG
+REMARK  ASSET_CLASS = SYNTHETIC_PLUMBING_FIXTURE
 ATOM      1  N   ASP A  25      16.520  24.850   3.920  1.00 15.00    -0.350 N 
 ATOM      2  CA  ASP A  25      15.820  25.650   4.950  1.00 15.00     0.100 C 
 ATOM      3  CG  ASP A  25      15.120  24.750   6.020  1.00 15.00     0.700 C 
@@ -153,6 +158,18 @@ def parse_vina_log_output(log_text: str) -> List[Dict[str, Any]]:
                     
     return poses
 
+
+def has_recognizable_vina_output(text: str) -> bool:
+    """Require Vina's banner as well as a result table before attestation."""
+    return bool(
+        re.search(r"(?im)^\s*#?\s*AutoDock Vina(?:\s|$)", text or "")
+        and re.search(r"(?im)^\s*mode\s*\|\s*affinity\s*\|", text or "")
+    )
+
+
+def _sha256_text(value: str) -> str:
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
 def execute_docking_job(job_id: str, request: DockingJobRequest) -> Tuple[List[Dict[str, Any]], List[FailureRecord], List[ArtifactInfo], Dict[str, Any]]:
     vina_info = detect_vina()
     job_dir = os.path.join(config.JOBS_DIR, job_id)
@@ -235,13 +252,18 @@ def execute_docking_job(job_id: str, request: DockingJobRequest) -> Tuple[List[D
         conf_art = save_job_artifact(job_id, f"{lig_id}_config.txt", config_text, file_type="config")
         artifacts.append(conf_art)
 
-        if vina_info["installed"]:
+        if vina_info.get("installed") and vina_info.get("identity_verified"):
             # Real subprocess invocation
             try:
+                # A prior file in a reused job directory is never evidence that
+                # the current subprocess created output.
+                for stale_path in (out_pdbqt_path, log_path):
+                    if os.path.exists(stale_path):
+                        os.remove(stale_path)
                 cmd = [vina_info["path"], "--config", config_path]
                 proc = subprocess.run(cmd, capture_output=True, text=True, timeout=config.MAX_DOCKING_TIMEOUT_SECONDS)
-                stdout = proc.stdout
-                stderr = proc.stderr
+                stdout = proc.stdout or ""
+                stderr = proc.stderr or ""
                 native_exit_codes.append(proc.returncode)
                 total_stdout.append(f"[{lig_id} STDOUT]\n{stdout}")
                 if stderr:
@@ -262,6 +284,16 @@ def execute_docking_job(job_id: str, request: DockingJobRequest) -> Tuple[List[D
                     with open(log_path, "r", encoding="utf-8") as f:
                         log_content = f.read()
 
+                if not has_recognizable_vina_output(log_content):
+                    failures.append(FailureRecord(
+                        molecule_id=lig_id,
+                        molecule_name=lig_name,
+                        smiles=lig.get("smiles", ""),
+                        error_type="VinaIdentityOrOutputError",
+                        error_message="Process exited successfully but did not emit a recognizable AutoDock Vina banner and result table"
+                    ))
+                    continue
+
                 poses = parse_vina_log_output(log_content)
                 if not poses:
                     failures.append(FailureRecord(
@@ -273,9 +305,34 @@ def execute_docking_job(job_id: str, request: DockingJobRequest) -> Tuple[List[D
                     ))
                     continue
 
-                if os.path.exists(out_pdbqt_path):
-                    out_art = save_job_artifact(job_id, out_pdbqt_filename, open(out_pdbqt_path, 'rb').read(), file_type="pdbqt_output")
-                    artifacts.append(out_art)
+                if not os.path.isfile(out_pdbqt_path) or os.path.getsize(out_pdbqt_path) == 0:
+                    failures.append(FailureRecord(
+                        molecule_id=lig_id,
+                        molecule_name=lig_name,
+                        smiles=lig.get("smiles", ""),
+                        error_type="VinaOutputFileMissing",
+                        error_message="AutoDock Vina did not create a non-empty output PDBQT file"
+                    ))
+                    continue
+
+                with open(out_pdbqt_path, "rb") as output_file:
+                    output_bytes = output_file.read()
+                output_valid, output_error = validate_pdbqt_format(
+                    output_bytes.decode("utf-8", errors="replace"),
+                    filename_hint=f"Vina output for {lig_id}",
+                )
+                if not output_valid:
+                    failures.append(FailureRecord(
+                        molecule_id=lig_id,
+                        molecule_name=lig_name,
+                        smiles=lig.get("smiles", ""),
+                        error_type="VinaOutputFileInvalid",
+                        error_message=output_error or "AutoDock Vina output PDBQT is malformed"
+                    ))
+                    continue
+
+                out_art = save_job_artifact(job_id, out_pdbqt_filename, output_bytes, file_type="pdbqt_output")
+                artifacts.append(out_art)
 
                 best_pose = poses[0]
                 results.append({
@@ -287,7 +344,12 @@ def execute_docking_job(job_id: str, request: DockingJobRequest) -> Tuple[List[D
                     "poses": poses,
                     "receptor_hash": rec_art.sha256_hash,
                     "ligand_hash": lig_art.sha256_hash,
-                    "tool": vina_info["version"] or "AutoDock Vina",
+                    "output_pdbqt_hash": out_art.sha256_hash,
+                    "stdout_sha256": _sha256_text(stdout),
+                    "config_sha256": conf_art.sha256_hash,
+                    "tool": "AutoDock Vina",
+                    "tool_version": vina_info["version"],
+                    "vina_binary_sha256": vina_info["binary_sha256"],
                     "result_origin": "COMPUTED"
                 })
 
@@ -321,7 +383,8 @@ def execute_docking_job(job_id: str, request: DockingJobRequest) -> Tuple[List[D
             else:
                 # Demo fallback execution
                 poses = parse_vina_log_output(VINA_STANDARD_LOG_FIXTURE)
-                base_score = -9.2 + ((hash(lig_id) % 20) / 10.0)
+                score_bucket = int(hashlib.sha256(lig_id.encode("utf-8")).hexdigest()[:8], 16) % 20
+                base_score = -9.2 + (score_bucket / 10.0)
                 for p in poses:
                     p["affinity_kcal_mol"] = round(base_score + (p["rank"] - 1) * 0.4, 1)
 
@@ -334,10 +397,11 @@ def execute_docking_job(job_id: str, request: DockingJobRequest) -> Tuple[List[D
                     "poses": poses,
                     "receptor_hash": rec_art.sha256_hash,
                     "ligand_hash": lig_art.sha256_hash,
-                    "tool": "AutoDock Vina (Simulated Demo Fallback)",
+                    "tool": "AIDD Vina-table demo fixture",
+                    "tool_version": "demo-fixture-v1",
                     "result_origin": "DEMO"
                 })
-                total_stdout.append(f"[{lig_id} NOTICE] Native AutoDock Vina binary not installed. Output generated via verified benchmark fixture.")
+                total_stdout.append(f"[{lig_id} NOTICE] Native AutoDock Vina was unavailable. Output came from a synthetic demo fixture and is not native evidence.")
 
     # Preserve a real native failure code if any subprocess failed.  A zero is
     # only valid when every attempted native subprocess produced a parsed
@@ -354,17 +418,50 @@ def execute_docking_job(job_id: str, request: DockingJobRequest) -> Tuple[List[D
         aggregate_exit_code = 0
 
     duration = round(time.time() - start_time, 3)
+    stdout_text = "\n".join(total_stdout)
+    stderr_text = "\n".join(total_stderr)
     meta = {
-        "tool": vina_info["version"] or "AutoDock Vina",
-        "production_ready": vina_info["installed"],
-        "stdout": "\n".join(total_stdout),
-        "stderr": "\n".join(total_stderr),
+        "tool": "AutoDock Vina" if vina_info.get("identity_verified") else "AIDD Vina-table demo fixture",
+        "tool_version": vina_info.get("version") or "demo-fixture-v1",
+        "vina_binary_sha256": vina_info.get("binary_sha256"),
+        "vina_version_output_sha256": vina_info.get("version_output_sha256"),
+        "vina_identity_verified": bool(vina_info.get("identity_verified")),
+        "production_ready": bool(vina_info.get("installed") and vina_info.get("identity_verified")),
+        "stdout": stdout_text,
+        "stderr": stderr_text,
+        "stdout_sha256": _sha256_text(stdout_text) if stdout_text else None,
+        "stderr_sha256": _sha256_text(stderr_text) if stderr_text else None,
+        "receptor_sha256": rec_art.sha256_hash,
+        "output_pdbqt_hashes": [r.get("output_pdbqt_hash") for r in results if r.get("output_pdbqt_hash")],
         "duration_seconds": duration,
         "search_box": sb.dict(),
         "exhaustiveness": request.exhaustiveness or 16,
         "seed": request.seed or 42,
         "exit_code": aggregate_exit_code
     }
+    reproducibility_payload = {
+        "tool": meta["tool"],
+        "tool_version": meta["tool_version"],
+        "vina_binary_sha256": meta["vina_binary_sha256"],
+        "search_box": meta["search_box"],
+        "exhaustiveness": meta["exhaustiveness"],
+        "num_modes": request.num_modes or 9,
+        "energy_range": request.energy_range or 3.0,
+        "seed": meta["seed"],
+        "results": [
+            {
+                "molecule_id": result.get("molecule_id"),
+                "docking_score": result.get("docking_score"),
+                "poses": result.get("poses"),
+                "result_origin": result.get("result_origin"),
+                "receptor_hash": result.get("receptor_hash"),
+                "ligand_hash": result.get("ligand_hash"),
+                "output_pdbqt_hash": result.get("output_pdbqt_hash"),
+            }
+            for result in sorted(results, key=lambda item: item.get("molecule_id") or "")
+        ],
+    }
+    meta["reproducibility_hash"] = _sha256_text(json.dumps(reproducibility_payload, sort_keys=True, separators=(",", ":")))
 
     return results, failures, artifacts, meta
 

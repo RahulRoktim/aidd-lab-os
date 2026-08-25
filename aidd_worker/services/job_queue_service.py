@@ -148,7 +148,7 @@ def run_descriptor_job(request: DescriptorJobRequest) -> JobResult:
                 "duration_seconds": duration
             }
             job.stdout = f"[{completed_at}] [INFO] Computed properties for {len(successful)} molecules using {tool_name}."
-            job.reproducibility_hash = compute_sha256(results_json)
+            job.reproducibility_hash = meta.get("reproducibility_hash") or compute_sha256(results_json)
 
     except Exception as e:
         with _JOBS_LOCK:
@@ -254,9 +254,10 @@ def run_docking_job(request: DockingJobRequest) -> JobResult:
 
     env_meta = capture_full_environment()
     vina_info = detect_vina()
-    tool_name = vina_info["version"] or "AutoDock Vina"
-    tool_ver = "1.2.5"
-    mode = "NATIVE" if vina_info["installed"] else "DEMO_FALLBACK"
+    vina_verified = bool(vina_info.get("installed") and vina_info.get("identity_verified"))
+    tool_name = "AutoDock Vina" if vina_verified else "AIDD Vina-table demo fixture"
+    tool_ver = vina_info.get("version") or "demo-fixture-v1"
+    mode = "NATIVE" if vina_verified else "DEMO_FALLBACK"
 
     job = JobResult(
         job_id=job_id,
@@ -267,7 +268,7 @@ def run_docking_job(request: DockingJobRequest) -> JobResult:
         worker_version=config.WORKER_VERSION,
         tool=tool_name,
         tool_version=tool_ver,
-        production_ready=vina_info["installed"],
+        production_ready=vina_verified,
         execution_mode=mode,
         environment_sha256=env_meta["environment_sha256"],
         created_at=created_at,
@@ -296,7 +297,19 @@ def run_docking_job(request: DockingJobRequest) -> JobResult:
         artifacts.append(chk_art)
 
         with _JOBS_LOCK:
-            job.status = JobStatus.COMPLETED if results else JobStatus.FAILED
+            native_success = bool(
+                results
+                and not failures
+                and meta.get("exit_code") == 0
+                and meta.get("vina_identity_verified") is True
+                and all(result.get("result_origin") == "COMPUTED" for result in results)
+            )
+            demo_success = bool(
+                results
+                and not failures
+                and all(result.get("result_origin") == "DEMO" for result in results)
+            )
+            job.status = JobStatus.COMPLETED if (native_success or demo_success) else JobStatus.FAILED
             job.completed_at = completed_at
             job.duration_seconds = duration
             job.successful_count = len(results)
@@ -307,12 +320,27 @@ def run_docking_job(request: DockingJobRequest) -> JobResult:
             job.stdout = meta.get("stdout", "")
             job.stderr = meta.get("stderr", "")
             job.exit_code = meta.get("exit_code")
+            job.tool = meta.get("tool") or tool_name
+            job.tool_version = meta.get("tool_version") or tool_ver
+            job.production_ready = bool(meta.get("production_ready"))
+            job.execution_mode = "NATIVE" if native_success else "DEMO_FALLBACK"
             job.metrics = {
                 "ligands_docked": len(results),
                 "best_affinity_kcal_mol": min([r["best_affinity_kcal_mol"] for r in results]) if results else 0.0,
-                "duration_seconds": duration
+                "duration_seconds": duration,
+                "exit_code": meta.get("exit_code"),
+                "worker_id": config.WORKER_ID,
+                "tool": job.tool,
+                "tool_version": job.tool_version,
+                "vina_identity_verified": meta.get("vina_identity_verified", False),
+                "vina_binary_sha256": meta.get("vina_binary_sha256"),
+                "vina_version_output_sha256": meta.get("vina_version_output_sha256"),
+                "stdout_sha256": meta.get("stdout_sha256"),
+                "stderr_sha256": meta.get("stderr_sha256"),
+                "receptor_sha256": meta.get("receptor_sha256"),
+                "output_pdbqt_hashes": meta.get("output_pdbqt_hashes", []),
             }
-            job.reproducibility_hash = compute_sha256(results_json)
+            job.reproducibility_hash = meta.get("reproducibility_hash") or compute_sha256(results_json)
 
     except Exception as e:
         with _JOBS_LOCK:

@@ -95,9 +95,10 @@ const AIDD = {
   },
 
   getOriginBadge(origin) {
-    const org = (origin || 'COMPUTED').toUpperCase();
-    let cls = 'badge-origin-computed';
-    if (org === 'IMPORTED') cls = 'badge-origin-imported';
+    const org = (origin || 'UNKNOWN').toUpperCase();
+    let cls = 'badge-origin-unknown';
+    if (org === 'COMPUTED') cls = 'badge-origin-computed';
+    else if (org === 'IMPORTED') cls = 'badge-origin-imported';
     else if (org === 'SIMULATED') cls = 'badge-origin-simulated';
     else if (org === 'DEMO') cls = 'badge-origin-demo';
     else if (org === 'MANUAL') cls = 'badge-origin-manual';
@@ -617,7 +618,7 @@ const AIDD = {
                       <td><b>#${c.rank_position}</b></td>
                       <td><b>${c.molecule_name}</b><br><code style="font-size: 10px;">${c.molecule_id}</code></td>
                       <td><b>${c.composite_score.toFixed(1)}</b></td>
-                      <td>${AIDD.getOriginBadge(c.docking_origin || 'COMPUTED')}</td>
+                      <td>${AIDD.getOriginBadge(c.docking_origin)}</td>
                       <td><span class="badge ${c.tier === 'Lead Candidate' ? 'badge-lead' : 'badge-backup'}">${c.tier}</span></td>
                     </tr>
                   `).join('')}
@@ -685,7 +686,7 @@ const AIDD = {
             <div>
               <div style="display: flex; align-items: center; gap: 8px;">
                 <span class="badge badge-completed">Stage 01 • Ingestion</span>
-                ${AIDD.getOriginBadge('COMPUTED')}
+                ${AIDD.getOriginBadge('UNKNOWN')}
               </div>
               <h3 style="font-size: 16px; margin-top: 4px;">Raw Dataset Ingestion & Chemical Parsing</h3>
               <p style="color: var(--text-secondary); font-size: 12px;">SMILES sanitization, canonicalization, valence validation, and SHA-256 fingerprint generation.</p>
@@ -700,7 +701,7 @@ const AIDD = {
             <div>
               <div style="display: flex; align-items: center; gap: 8px;">
                 <span class="badge badge-completed">Stage 02 • Preprocessing</span>
-                ${AIDD.getOriginBadge('COMPUTED')}
+                ${AIDD.getOriginBadge('UNKNOWN')}
               </div>
               <h3 style="font-size: 16px; margin-top: 4px;">Standardization, Desalting & Drug-Likeness (Ro5) Filter</h3>
               <p style="color: var(--text-secondary); font-size: 12px;">Strips inorganic counterions, neutralizes formal charges, and enforces Lipinski MW & LogP cutoffs.</p>
@@ -715,7 +716,7 @@ const AIDD = {
             <div>
               <div style="display: flex; align-items: center; gap: 8px;">
                 <span class="badge badge-running">Stage 03 • Docking</span>
-                ${AIDD.getOriginBadge('IMPORTED')}
+                ${AIDD.getOriginBadge('UNKNOWN')}
               </div>
               <h3 style="font-size: 16px; margin-top: 4px;">AutoDock Vina Structure-Based Screen / Import</h3>
               <p style="color: var(--text-secondary); font-size: 12px;">Binding free energies with full receptor hashes, grid coordinates (x,y,z), and exhaustiveness parameters.</p>
@@ -730,7 +731,7 @@ const AIDD = {
             <div>
               <div style="display: flex; align-items: center; gap: 8px;">
                 <span class="badge badge-running">Stage 04 • Pharmacokinetics</span>
-                ${AIDD.getOriginBadge('IMPORTED')}
+                ${AIDD.getOriginBadge('UNKNOWN')}
               </div>
               <h3 style="font-size: 16px; margin-top: 4px;">In Silico ADMET & Safety Profiling</h3>
               <p style="color: var(--text-secondary); font-size: 12px;">Evaluates BOILED-Egg GI absorption, BBB penetrance, CYP450 inhibition, and Ames/hERG toxicity flags.</p>
@@ -745,7 +746,7 @@ const AIDD = {
             <div>
               <div style="display: flex; align-items: center; gap: 8px;">
                 <span class="badge badge-lead">Stage 05 • Candidate Selection</span>
-                ${AIDD.getOriginBadge('COMPUTED')}
+                ${AIDD.getOriginBadge('UNKNOWN')}
               </div>
               <h3 style="font-size: 16px; margin-top: 4px;">Mathematically Transparent Multi-Parameter Ranking</h3>
               <p style="color: var(--text-secondary); font-size: 12px;">Multi-objective composite optimization across Docking, QSAR, ADMET, and QED with customizable missing-data policies.</p>
@@ -859,7 +860,7 @@ const AIDD = {
                   <td>
                     ${m.docking_score !== null && m.docking_score !== undefined ? `
                       <code>${m.docking_score.toFixed(1)} kcal/mol</code>
-                      ${AIDD.getOriginBadge(m.docking_origin || 'IMPORTED')}
+                      ${AIDD.getOriginBadge(m.docking_origin)}
                     ` : '<span class="text-muted">Not Docked</span>'}
                   </td>
                   <td>
@@ -927,7 +928,7 @@ const AIDD = {
           <div class="timeline-details">${item.details}</div>
           <div style="margin-top: 6px; display: flex; align-items: center; gap: 8px; font-size: 11px;">
             <span class="badge badge-active">${item.tool}</span>
-            ${AIDD.getOriginBadge(item.origin || 'COMPUTED')}
+            ${AIDD.getOriginBadge(item.origin)}
             ${item.experiment_id ? `<a href="#" style="color: var(--accent-cyan);" onclick="event.preventDefault(); AIDD.openExperimentModal('${item.experiment_id}')">Inspect Exp (${item.experiment_id}) →</a>` : ''}
           </div>
         </div>
@@ -967,8 +968,8 @@ const AIDD = {
                 <tr><td class="text-secondary" style="padding: 3px 0;">TPSA</td><td><b>${mol.tpsa} Å²</b></td></tr>
                 <tr><td class="text-secondary" style="padding: 3px 0;">HBD / HBA</td><td><b>${mol.hbd} / ${mol.hba}</b></td></tr>
                 <tr><td class="text-secondary" style="padding: 3px 0;">Rotatable Bonds</td><td><b>${mol.rotatable_bonds}</b></td></tr>
-                <tr><td class="text-secondary" style="padding: 3px 0;">QED Drug-likeness</td><td><b>${mol.qed || '0.50'}</b></td></tr>
-                <tr><td class="text-secondary" style="padding: 3px 0;">Descriptor Origin</td><td>${AIDD.getOriginBadge(mol.descriptor_origin || 'COMPUTED')}</td></tr>
+                <tr><td class="text-secondary" style="padding: 3px 0;">QED Drug-likeness</td><td><b>${mol.qed ?? 'MISSING'}</b></td></tr>
+                <tr><td class="text-secondary" style="padding: 3px 0;">Descriptor Origin</td><td>${AIDD.getOriginBadge(mol.descriptor_origin)}</td></tr>
               </table>
             </div>
           </div>
@@ -984,7 +985,7 @@ const AIDD = {
               <div class="card" style="margin-top: 16px; padding: 12px;">
                 <div class="flex justify-between items-center" style="margin-bottom: 6px;">
                   <div class="card-title" style="font-size: 12px; margin-bottom: 0;">Docking Binding Profile</div>
-                  ${AIDD.getOriginBadge(mol.docking_results[0].result_origin || 'IMPORTED')}
+                  ${AIDD.getOriginBadge(mol.docking_results[0].result_origin)}
                 </div>
                 <div style="font-size: 12px;">
                   <b>Tool:</b> ${mol.docking_results[0].docking_tool} | 
@@ -998,7 +999,7 @@ const AIDD = {
               <div class="card" style="margin-top: 12px; padding: 12px;">
                 <div class="flex justify-between items-center" style="margin-bottom: 6px;">
                   <div class="card-title" style="font-size: 12px; margin-bottom: 0;">Pharmacokinetics & ADMET Risk Profile</div>
-                  ${AIDD.getOriginBadge(mol.admet_results[0].result_origin || 'IMPORTED')}
+                  ${AIDD.getOriginBadge(mol.admet_results[0].result_origin)}
                 </div>
                 <div style="font-size: 12px; display: grid; grid-template-columns: 1fr 1fr; gap: 8px;">
                   <div>GI Absorption: <b>${mol.admet_results[0].gi_absorption}</b></div>
@@ -1224,7 +1225,7 @@ const AIDD = {
                     ${e.reproduction_of_id ? `<span class="badge badge-active" style="font-size: 9px;">Reproduction of ${e.reproduction_of_id}</span>` : ''}
                   </td>
                   <td><span class="badge badge-active">${e.stage}</span></td>
-                  <td><code>${e.tool} v${e.tool_version}</code></td>
+                  <td><code>${e.tool} — ${e.tool_version}</code></td>
                   <td>${e.input_dataset_label ? `<code>${e.input_dataset_label}</code>` : '<span class="text-muted">—</span>'}</td>
                   <td>${e.output_dataset_label ? `<code>${e.output_dataset_label}</code>` : '<span class="text-muted">—</span>'}</td>
                   <td>${e.molecules_in} in / ${e.molecules_out} out ${e.molecules_failed > 0 ? `<span style="color: #EF4444; font-weight: 700;">(${e.molecules_failed} fail)</span>` : ''}</td>
@@ -1274,7 +1275,7 @@ const AIDD = {
           <div style="display: flex; gap: 10px; align-items: center;">
             <span class="badge badge-locked">🔒 Immutable Record</span>
             <div><b>Stage:</b> <span class="badge badge-active">${exp.stage}</span></div>
-            <div><b>Tool:</b> <code>${exp.tool} v${exp.tool_version}</code></div>
+            <div><b>Tool:</b> <code>${exp.tool} — ${exp.tool_version}</code></div>
             <div><b>Status:</b> <span class="badge badge-${exp.status}">${exp.status}</span></div>
           </div>
           <div class="flex gap-2">
@@ -1424,7 +1425,7 @@ const AIDD = {
                   <td>${c.logp ? c.logp.toFixed(2) : ''}</td>
                   <td>${c.tpsa ? c.tpsa.toFixed(1) : ''}</td>
                   <td><span class="badge ${c.tier === 'Lead Candidate' ? 'badge-lead' : 'badge-backup'}">${c.tier}</span></td>
-                  <td>${AIDD.getOriginBadge(c.result_origin || 'COMPUTED')}</td>
+                  <td>${AIDD.getOriginBadge(c.result_origin || 'UNKNOWN')}</td>
                 </tr>
               `).join('')}
             </tbody>
@@ -1926,14 +1927,14 @@ const AIDD = {
         <div class="form-group">
           <label class="form-label">Data Origin</label>
           <select id="dock-origin" class="form-control">
-            <option value="IMPORTED">IMPORTED (Real AutoDock Vina Result File)</option>
-            <option value="SIMULATED">SIMULATED (In Silico Physics Model)</option>
-            <option value="DEMO">DEMO (Pre-calculated Benchmark)</option>
+            <option value="SIMULATED">SIMULATED (Descriptor heuristic estimate)</option>
+            <option value="IMPORTED">IMPORTED (User-supplied docking scores)</option>
+            <option value="DEMO">DEMO (Synthetic interface fixture)</option>
           </select>
         </div>
         <div class="form-group">
-          <label class="form-label">Docking Tool & Version</label>
-          <input type="text" id="dock-tool" class="form-control" value="AutoDock Vina v1.2.5">
+          <label class="form-label">Source Tool / Provider</label>
+          <input type="text" id="dock-tool" class="form-control" value="User-supplied docking export">
         </div>
         <div class="form-group">
           <label class="form-label">Receptor Target</label>
@@ -1942,6 +1943,10 @@ const AIDD = {
         <div class="form-group">
           <label class="form-label">Grid Center Coordinates (x, y, z)</label>
           <input type="text" id="dock-grid" class="form-control" value="center_x=22.4, y=0.8, z=52.5">
+        </div>
+        <div class="form-group">
+          <label class="form-label">Imported Scores CSV (required only for IMPORTED)</label>
+          <textarea id="dock-csv" class="form-control" rows="5" placeholder="molecule_id,docking_score&#10;LIG-001,-8.4"></textarea>
         </div>
       `,
       footer: `
@@ -1956,6 +1961,7 @@ const AIDD = {
     const tool = document.getElementById('dock-tool').value;
     const receptor = document.getElementById('dock-receptor').value;
     const grid = document.getElementById('dock-grid').value;
+    const importedCsv = document.getElementById('dock-csv').value.trim();
 
     await this.api(`/api/projects/${projectId}/experiments/docking`, {
       method: 'POST',
@@ -1964,7 +1970,8 @@ const AIDD = {
         docking_tool: tool,
         receptor: receptor,
         grid_center: grid,
-        result_origin: origin
+        result_origin: origin,
+        custom_scores_csv: importedCsv || null
       })
     });
 
@@ -1980,14 +1987,18 @@ const AIDD = {
         <div class="form-group">
           <label class="form-label">Data Origin</label>
           <select id="admet-origin" class="form-control">
-            <option value="IMPORTED">IMPORTED (SwissADME / pkCSM Export File)</option>
-            <option value="SIMULATED">SIMULATED (In Silico Rule Consensus)</option>
-            <option value="DEMO">DEMO (Pre-calculated Benchmark)</option>
+            <option value="SIMULATED">SIMULATED (Descriptor heuristic estimate)</option>
+            <option value="IMPORTED">IMPORTED (User-supplied endpoint rows)</option>
+            <option value="DEMO">DEMO (Synthetic interface fixture)</option>
           </select>
         </div>
         <div class="form-group">
           <label class="form-label">Profiling Engine / Provider</label>
-          <input type="text" id="admet-tool" class="form-control" value="SwissADME & pkCSM Engine">
+          <input type="text" id="admet-tool" class="form-control" value="User-supplied ADMET export">
+        </div>
+        <div class="form-group">
+          <label class="form-label">Imported ADMET CSV (required only for IMPORTED)</label>
+          <textarea id="admet-csv" class="form-control" rows="5" placeholder="molecule_id,gi_absorption,bbb_permeant,..."></textarea>
         </div>
       `,
       footer: `
@@ -2000,12 +2011,14 @@ const AIDD = {
   async submitADMET(projectId, datasetId) {
     const origin = document.getElementById('admet-origin').value;
     const tool = document.getElementById('admet-tool').value;
+    const importedCsv = document.getElementById('admet-csv').value.trim();
     await this.api(`/api/projects/${projectId}/experiments/admet`, {
       method: 'POST',
       body: JSON.stringify({
         input_dataset_id: datasetId,
         tool_name: tool,
-        result_origin: origin
+        result_origin: origin,
+        custom_admet_csv: importedCsv || null
       })
     });
 

@@ -1,10 +1,34 @@
 import json
 from types import SimpleNamespace
+from pathlib import Path
 
 import pytest
 
 from aidd_worker.models import DockingJobRequest, SearchBoxConfig
 from aidd_worker.services import job_queue_service, job_service, vina_service
+
+
+VERIFIED_VINA = {
+    "installed": True,
+    "path": "/usr/bin/vina",
+    "version": "AutoDock Vina test",
+    "production_ready": True,
+    "identity_verified": True,
+    "binary_sha256": "a" * 64,
+    "version_output_sha256": "b" * 64,
+}
+
+
+def _completed_process(args, stdout=vina_service.VINA_STANDARD_LOG_FIXTURE, returncode=0, write_output=True):
+    if write_output and returncode == 0:
+        config_path = Path(args[0][2])
+        out_path = next(
+            Path(line.split("=", 1)[1].strip())
+            for line in config_path.read_text(encoding="utf-8").splitlines()
+            if line.startswith("out =")
+        )
+        out_path.write_text(vina_service.ERLOTINIB_LIGAND_PDBQT, encoding="utf-8")
+    return SimpleNamespace(returncode=returncode, stdout=stdout, stderr="" if returncode == 0 else "native failure")
 
 
 def _request(ligand_count=1):
@@ -36,16 +60,12 @@ def test_successful_native_vina_execution_returns_zero_exit_code(monkeypatch, tm
     monkeypatch.setattr(
         vina_service,
         "detect_vina",
-        lambda: {"installed": True, "path": "/usr/bin/vina", "version": "AutoDock Vina test"},
+        lambda: VERIFIED_VINA,
     )
     monkeypatch.setattr(
         vina_service.subprocess,
         "run",
-        lambda *args, **kwargs: SimpleNamespace(
-            returncode=0,
-            stdout=vina_service.VINA_STANDARD_LOG_FIXTURE,
-            stderr="",
-        ),
+        lambda *args, **kwargs: _completed_process(args),
     )
 
     results, failures, _, meta = vina_service.execute_docking_job("job_success", _request())
@@ -55,20 +75,32 @@ def test_successful_native_vina_execution_returns_zero_exit_code(monkeypatch, tm
     assert meta["exit_code"] == 0
 
 
+def test_native_reproducibility_hash_excludes_job_specific_paths(monkeypatch, tmp_path):
+    monkeypatch.setattr(vina_service.config, "JOBS_DIR", str(tmp_path))
+    monkeypatch.setattr(vina_service, "detect_vina", lambda: VERIFIED_VINA)
+    monkeypatch.setattr(vina_service.subprocess, "run", lambda *args, **kwargs: _completed_process(args))
+
+    first_results, first_failures, _, first_meta = vina_service.execute_docking_job("job_first", _request())
+    second_results, second_failures, _, second_meta = vina_service.execute_docking_job("job_second", _request())
+
+    assert first_failures == second_failures == []
+    assert first_results[0]["config_sha256"] != second_results[0]["config_sha256"]
+    assert first_meta["reproducibility_hash"] == second_meta["reproducibility_hash"]
+
+
 def test_native_vina_preserves_nonzero_code_across_multiple_ligands(monkeypatch, tmp_path):
     monkeypatch.setattr(vina_service.config, "JOBS_DIR", str(tmp_path))
     monkeypatch.setattr(
         vina_service,
         "detect_vina",
-        lambda: {"installed": True, "path": "/usr/bin/vina", "version": "AutoDock Vina test"},
+        lambda: VERIFIED_VINA,
     )
-    process_results = iter(
-        [
-            SimpleNamespace(returncode=7, stdout="", stderr="native failure"),
-            SimpleNamespace(returncode=0, stdout=vina_service.VINA_STANDARD_LOG_FIXTURE, stderr=""),
-        ]
-    )
-    monkeypatch.setattr(vina_service.subprocess, "run", lambda *args, **kwargs: next(process_results))
+    call_count = 0
+    def run_process(*args, **kwargs):
+        nonlocal call_count
+        call_count += 1
+        return _completed_process(args, returncode=7) if call_count == 1 else _completed_process(args)
+    monkeypatch.setattr(vina_service.subprocess, "run", run_process)
 
     results, failures, _, meta = vina_service.execute_docking_job("job_partial", _request(2))
 
@@ -82,15 +114,14 @@ def test_zero_is_not_fabricated_when_native_output_is_incomplete(monkeypatch, tm
     monkeypatch.setattr(
         vina_service,
         "detect_vina",
-        lambda: {"installed": True, "path": "/usr/bin/vina", "version": "AutoDock Vina test"},
+        lambda: VERIFIED_VINA,
     )
-    process_results = iter(
-        [
-            SimpleNamespace(returncode=0, stdout="unparseable output", stderr=""),
-            SimpleNamespace(returncode=0, stdout=vina_service.VINA_STANDARD_LOG_FIXTURE, stderr=""),
-        ]
-    )
-    monkeypatch.setattr(vina_service.subprocess, "run", lambda *args, **kwargs: next(process_results))
+    call_count = 0
+    def run_process(*args, **kwargs):
+        nonlocal call_count
+        call_count += 1
+        return _completed_process(args, stdout="unparseable output") if call_count == 1 else _completed_process(args)
+    monkeypatch.setattr(vina_service.subprocess, "run", run_process)
 
     results, failures, _, meta = vina_service.execute_docking_job("job_incomplete", _request(2))
 
@@ -105,7 +136,7 @@ def test_job_managers_propagate_docking_exit_code(monkeypatch, tmp_path, service
     monkeypatch.setattr(
         service,
         "detect_vina",
-        lambda: {"installed": True, "path": "/usr/bin/vina", "version": "AutoDock Vina test"},
+        lambda: VERIFIED_VINA,
     )
     if service is job_queue_service:
         monkeypatch.setattr(
@@ -120,13 +151,19 @@ def test_job_managers_propagate_docking_exit_code(monkeypatch, tmp_path, service
             [
                 {
                     "molecule_id": "LIG-1",
+                    "docking_score": -7.5,
                     "best_affinity_kcal_mol": -7.5,
                     "result_origin": "COMPUTED",
                 }
             ],
             [],
             [],
-            {"stdout": "native stdout", "stderr": "", "exit_code": 0},
+            {
+                "stdout": "native stdout", "stderr": "", "exit_code": 0,
+                "tool": "AutoDock Vina", "tool_version": "AutoDock Vina test",
+                "production_ready": True, "vina_identity_verified": True,
+                "vina_binary_sha256": "a" * 64,
+            },
         ),
     )
 

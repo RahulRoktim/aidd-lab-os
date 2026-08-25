@@ -1,6 +1,6 @@
 # AIDD Lab OS — Artificial Intelligence Drug Discovery Lab Operating System (v1.4.0)
 
-**AIDD Lab OS** is a production-grade, provenance-tracking computational drug discovery platform. It decouples high-level project management, dataset versioning, decision logging, and candidate ranking from heavy native scientific computation via a dedicated **AIDD Scientific Worker**.
+**AIDD Lab OS** is a provenance-tracking computational drug discovery workspace. It separates project management, dataset versioning, decision logging, and candidate ranking from native scientific computation via a dedicated **AIDD Scientific Worker**.
 
 ---
 
