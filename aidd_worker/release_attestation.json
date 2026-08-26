@@ -1,0 +1,33 @@
+{
+  "schema_version": 1,
+  "release_id": "aidd-worker-1.4.0-linux-64",
+  "supported_platform": "linux-64",
+  "trust_model": "Repository-controlled release metadata verified during image build and rechecked at worker readiness and immediately before execution.",
+  "container_base": {
+    "image": "continuumio/miniconda3",
+    "digest": "sha256:1808b31ef43e9c521cde5884ba4df9ec26d8d503a314cea787590f8550358a63"
+  },
+  "vina": {
+    "expected_path": "/opt/conda/envs/aidd-worker-env/bin/vina",
+    "expected_binary_sha256": "04598a43755cd0e258ac62fc88dcd886aaac6a3167b8ff8712ddc4c07090a019",
+    "expected_version": "AutoDock Vina 36dd023-mod",
+    "package": {
+      "name": "vina",
+      "version": "1.2.5",
+      "build": "py311hfdbb021_5",
+      "url": "https://conda.anaconda.org/conda-forge/linux-64/vina-1.2.5-py311hfdbb021_5.conda",
+      "sha256": "113847ffb076797e52d45186d8e5b49a5b276d1a15dd3f55a2efb0b358f935f5"
+    }
+  },
+  "rdkit": {
+    "expected_version": "2023.09.5",
+    "expected_module_prefix": "/opt/conda/envs/aidd-worker-env/lib/python3.11/site-packages/rdkit",
+    "package": {
+      "name": "rdkit",
+      "version": "2023.09.5",
+      "build": "py311h4c2f14b_0",
+      "url": "https://conda.anaconda.org/conda-forge/linux-64/rdkit-2023.09.5-py311h4c2f14b_0.conda",
+      "sha256": "996a0af23017011f1ff49dbb6a27846e3de18cd1303462918bfac284a57e0e38"
+    }
+  }
+}

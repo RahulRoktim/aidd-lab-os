@@ -139,7 +139,7 @@ def run_worker_tests():
     # 8. Security Controls (Path Traversal Protection)
     print("\n[TEST 8] Security & Sandboxing Controls:")
     try:
-        req = urllib.request.Request("http://127.0.0.1:8001/jobs/test_job/artifacts/../../etc/passwd")
+        req = urllib.request.Request(f"{worker_client.WORKER_URL}/jobs/test_job/artifacts/../../etc/passwd")
         urllib.request.urlopen(req)
         assert False, "Path traversal must be blocked!"
     except urllib.error.HTTPError as e:
@@ -148,7 +148,7 @@ def run_worker_tests():
     print("✓ [TEST 8 PASSED] Path traversal protection verified.")
 
     print("\n================================================================================")
-    print("ALL 8 SCIENTIFIC WORKER & RUNTIME AUDIT STAGES PASSED 100%!")
+    print("ALL 8 SCIENTIFIC WORKER & RUNTIME AUDIT STAGES PASSED!")
     print("================================================================================")
 
 if __name__ == "__main__":

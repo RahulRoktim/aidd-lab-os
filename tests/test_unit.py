@@ -13,7 +13,7 @@ from aidd_worker.models import (
     JobStatus, ExecutionMode, StandardizationProfile
 )
 from aidd_worker.services.artifact_service import compute_sha256
-from aidd_worker.services.vina_service import validate_pdbqt_format, EGFR_4WKQ_RECEPTOR_PDBQT, ERLOTINIB_LIGAND_PDBQT
+from aidd_worker.services.vina_service import validate_pdbqt_format, EGFR_4WKQ_RECEPTOR_PDBQT, SYNTHETIC_LIGAND_FIXTURE_B_PDBQT
 
 def test_search_box_positive_bounds():
     # Valid bounding box
@@ -42,7 +42,7 @@ def test_pdbqt_format_validation():
     assert v_rec is True
     assert err_rec is None
 
-    v_lig, err_lig = validate_pdbqt_format(ERLOTINIB_LIGAND_PDBQT)
+    v_lig, err_lig = validate_pdbqt_format(SYNTHETIC_LIGAND_FIXTURE_B_PDBQT)
     assert v_lig is True
     assert err_lig is None
 

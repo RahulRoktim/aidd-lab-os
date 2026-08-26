@@ -26,17 +26,18 @@ except ImportError:
     HAS_RDKIT = False
     RDKIT_VERSION = None
 
-# Reference standards for automated regression testing
+# RDKit-method regression snapshots for automated execution testing.  These
+# ranges are implementation checks, not experimental ground truth.
 REFERENCE_BENCHMARKS = {
     "caffeine": {
         "smiles": "CN1C=NC2=C1C(=O)N(C(=O)N2C)C",
         "formula": "C8H10N4O2",
         "exact_mw": 194.19,
         "mw_range": (194.0, 194.3),
-        "logp_range": (-0.8, 0.2),
+        "logp_range": (-1.2, -0.8),
         "tpsa_range": (45.0, 65.0),
         "hbd": 0,
-        "hba": 4,
+        "hba": 6,
         "rotatable_bonds": 0
     },
     "aspirin": {
@@ -47,7 +48,7 @@ REFERENCE_BENCHMARKS = {
         "logp_range": (1.0, 1.8),
         "tpsa_range": (60.0, 68.0),
         "hbd": 1,
-        "hba": 4,
+        "hba": 3,
         "rotatable_bonds": 3
     },
     "acetaminophen": {
@@ -69,7 +70,7 @@ REFERENCE_BENCHMARKS = {
         "logp_range": (2.8, 3.8),
         "tpsa_range": (35.0, 42.0),
         "hbd": 1,
-        "hba": 2,
+        "hba": 1,
         "rotatable_bonds": 4
     },
     "ethanol": {
@@ -355,7 +356,7 @@ class PurePythonMolecule:
 
 class ScientificEngine:
     """
-    Production-grade Scientific Computation Service.
+    Scientific computation service with explicit native and fallback modes.
     Wraps RDKit when available, or provides clearly annotated reference fallback algorithms.
     """
 
@@ -366,7 +367,7 @@ class ScientificEngine:
             "rdkit_version": RDKIT_VERSION,
             "active_engine": f"RDKit v{RDKIT_VERSION}" if HAS_RDKIT else "Internal Pure-Python Reference Engine v1.2.0 (Non-Production Fallback)",
             "is_production_ready": HAS_RDKIT,
-            "engine_notice": "Native RDKit operational." if HAS_RDKIT else "Running in pure-Python reference mode. For certified clinical CADD pipelines, RDKit native C++ binaries are required."
+            "engine_notice": "Native RDKit operational." if HAS_RDKIT else "Running in pure-Python reference mode; results are simulated estimates, not native RDKit computations."
         }
 
     @classmethod
@@ -442,7 +443,7 @@ class ScientificEngine:
                         "valid": False,
                         "error": "RDKit failed to parse SMILES",
                         "smiles": clean_smi,
-                        "result_origin": "COMPUTED"
+                        "result_origin": None
                     }
 
                 mw = round(Descriptors.MolWt(mol), 2)
@@ -503,7 +504,7 @@ class ScientificEngine:
                     "valid": False,
                     "error": f"RDKit calculation error: {str(e)}",
                     "smiles": clean_smi,
-                    "result_origin": "COMPUTED"
+                    "result_origin": None
                 }
         else:
             mol = PurePythonMolecule(clean_smi)
@@ -512,7 +513,7 @@ class ScientificEngine:
                     "valid": False,
                     "error": mol.error_message or "Chemical parsing failed",
                     "smiles": clean_smi,
-                    "result_origin": "COMPUTED"
+                    "result_origin": None
                 }
 
             mw = 0.0
@@ -667,7 +668,7 @@ class ScientificEngine:
                 "sas_score": round(min(10.0, max(1.0, 1.5 + 0.005 * mw + 0.3 * num_rings + 0.1 * rot_bonds)), 2),
                 "engine": "Internal Pure-Python Reference Engine v1.2.0 (Non-Production Fallback)",
                 "engine_type": "FALLBACK_HEURISTIC",
-                "result_origin": "COMPUTED",
+                "result_origin": "SIMULATED",
                 "timestamp": start_ts
             }
 

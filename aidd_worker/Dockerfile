@@ -1,19 +1,24 @@
 # Multi-Stage Reproducible Scientific Container for AIDD Worker
 # Stage 1: Build scientific environment with conda-forge RDKit & AutoDock Vina
-FROM continuumio/miniconda3:latest AS builder
+FROM continuumio/miniconda3@sha256:1808b31ef43e9c521cde5884ba4df9ec26d8d503a314cea787590f8550358a63 AS builder
 
 LABEL maintainer="AIDD Lab OS Computational Chemistry Core <core@aidd-lab-os.org>"
 LABEL version="1.4.0"
-LABEL description="Production Scientific Worker container with native RDKit, AutoDock Vina, and OpenBabel"
+LABEL description="Attested Docker scientific worker with native RDKit, AutoDock Vina, and OpenBabel"
 
 WORKDIR /build
 
 COPY aidd_worker/environment.yml .
+COPY aidd_worker/release_attestation.json .
+COPY aidd_worker/verify_release_environment.py .
 RUN conda env create -f environment.yml && \
+    /opt/conda/envs/aidd-worker-env/bin/python verify_release_environment.py \
+      --metadata release_attestation.json \
+      --prefix /opt/conda/envs/aidd-worker-env && \
     conda clean -afy
 
 # Stage 2: Runtime image
-FROM continuumio/miniconda3:latest AS runtime
+FROM continuumio/miniconda3@sha256:1808b31ef43e9c521cde5884ba4df9ec26d8d503a314cea787590f8550358a63 AS runtime
 
 WORKDIR /app
 

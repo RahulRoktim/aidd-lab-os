@@ -18,6 +18,7 @@ from aidd_worker.models import (
 from aidd_worker.services.capability_service import get_all_capabilities, detect_rdkit, detect_vina, detect_openbabel
 from aidd_worker.services.environment_service import capture_full_environment
 from aidd_worker.services.rdkit_service import run_50_molecule_validation_suite
+from aidd_worker.services.artifact_service import resolve_job_path
 from aidd_worker.services import job_queue_service
 
 app = FastAPI(
@@ -65,20 +66,37 @@ async def get_readiness():
     ob = detect_openbabel()
     env = capture_full_environment()
 
-    is_fully_ready = rdk["installed"] and vina["installed"]
-    status_str = "READY" if is_fully_ready else ("DEGRADED" if rdk["installed"] or vina["installed"] else "UNAVAILABLE")
+    rdkit_verified = bool(rdk.get("installed") and rdk.get("production_ready"))
+    vina_verified = bool(vina.get("installed") and vina.get("identity_verified") and vina.get("binary_digest_verified"))
+    is_fully_ready = rdkit_verified and vina_verified
+    status_str = "READY" if is_fully_ready else ("DEGRADED" if rdk.get("installed") or vina.get("installed") else "UNAVAILABLE")
 
     return ReadinessResponse(
         status=status_str,
         health="OK",
         worker_version=config.WORKER_VERSION,
+        worker_id=config.WORKER_ID,
         api_version=config.API_VERSION,
-        rdkit_ready=rdk["installed"],
+        rdkit_ready=rdkit_verified,
         rdkit_version=rdk["version"],
         rdkit_backend=rdk["backend"],
-        vina_ready=vina["installed"],
+        rdkit_module_path=rdk.get("module_path"),
+        rdkit_module_origin_verified=rdk.get("module_origin_verified", False),
+        rdkit_native_components_verified=rdk.get("native_components_verified", False),
+        rdkit_package_metadata_verified=rdk.get("package_metadata_verified", False),
+        rdkit_known_answer_verified=rdk.get("known_answer_verified", False),
+        rdkit_known_answer_results=rdk.get("known_answer_results", []),
+        vina_ready=vina_verified,
         vina_version=vina["version"],
         vina_path=vina["path"],
+        vina_expected_path=vina.get("expected_path"),
+        vina_identity_verified=vina.get("identity_verified", False),
+        vina_binary_sha256=vina.get("binary_sha256"),
+        vina_expected_binary_sha256=vina.get("expected_binary_sha256"),
+        vina_binary_digest_verified=vina.get("binary_digest_verified", False),
+        vina_path_verified=vina.get("path_verified", False),
+        vina_package_metadata_verified=vina.get("package_metadata_verified", False),
+        vina_version_output_sha256=vina.get("version_output_sha256"),
         openbabel_ready=ob["installed"],
         environment_sha256=env["environment_sha256"],
         diagnostics={
@@ -145,8 +163,10 @@ async def cancel_job(job_id: str):
 
 @app.get("/jobs/{job_id}/artifacts/{filename}")
 async def get_job_artifact(job_id: str, filename: str):
-    safe_filename = os.path.basename(filename)
-    file_path = os.path.join(config.JOBS_DIR, job_id, safe_filename)
+    try:
+        file_path = resolve_job_path(job_id, filename)
+    except ValueError:
+        raise HTTPException(status_code=404, detail="Artifact file not found")
     if not os.path.exists(file_path):
         raise HTTPException(status_code=404, detail="Artifact file not found")
     return FileResponse(file_path)

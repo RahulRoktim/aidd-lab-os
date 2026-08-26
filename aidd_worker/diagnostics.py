@@ -32,13 +32,13 @@ def run_diagnostics():
     print(f"RDKit Cheminformatics: {'[READY]' if rdkit_st['installed'] else '[NOT INSTALLED / FALLBACK]'}")
     print(f"  - Version:           {rdkit_st['version'] or 'N/A'}")
     print(f"  - Backend:           {rdkit_st['backend']}")
-    print(f"  - Production Ready:  {rdkit_st['production_ready']}")
+    print(f"  - Native Attested:   {rdkit_st['production_ready']}")
 
     vina_st = caps["scientific_software"]["autodock_vina"]
     print(f"AutoDock Vina Docking: {'[READY]' if vina_st['installed'] else '[NOT DETECTED]'}")
     print(f"  - Executable Path:   {vina_st['path'] or 'None'}")
     print(f"  - Version:           {vina_st['version'] or 'N/A'}")
-    print(f"  - Production Ready:  {vina_st['production_ready']}")
+    print(f"  - Native Attested:   {vina_st['production_ready']}")
 
     obabel_st = caps["scientific_software"]["openbabel"]
     print(f"OpenBabel Utility:     {'[READY]' if obabel_st['installed'] else '[NOT DETECTED]'}")

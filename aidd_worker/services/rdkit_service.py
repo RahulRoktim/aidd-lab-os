@@ -96,7 +96,7 @@ def calculate_descriptors_batch(molecules: List[MoleculeInput]) -> Tuple[List[di
     or the calibrated pure-Python reference fallback.
     """
     rdkit_info = detect_rdkit()
-    has_rdkit = rdkit_info["installed"]
+    has_rdkit = bool(rdkit_info.get("installed") and rdkit_info.get("production_ready"))
 
     successful = []
     failures = []
@@ -227,12 +227,21 @@ def calculate_descriptors_batch(molecules: List[MoleculeInput]) -> Tuple[List[di
                 "fingerprint": fp,
                 "engine": "AIDD Python Reference Engine (Non-Production Fallback)",
                 "production_ready": False,
-                "result_origin": "COMPUTED"
+                "result_origin": "SIMULATED"
             })
 
     meta = {
         "engine": f"RDKit v{rdkit_info['version']}" if has_rdkit else "AIDD Python Reference Engine (Non-Production Fallback)",
         "production_ready": has_rdkit,
+        "rdkit_attestation": {
+            "version": rdkit_info.get("version"),
+            "module_path": rdkit_info.get("module_path"),
+            "module_origin_verified": rdkit_info.get("module_origin_verified", False),
+            "native_components_verified": rdkit_info.get("native_components_verified", False),
+            "package_metadata_verified": rdkit_info.get("package_metadata_verified", False),
+            "known_answer_verified": rdkit_info.get("known_answer_verified", False),
+            "known_answer_results": rdkit_info.get("known_answer_results", []),
+        },
         "total_molecules": len(molecules),
         "successful_count": len(successful),
         "failed_count": len(failures)
@@ -242,7 +251,7 @@ def calculate_descriptors_batch(molecules: List[MoleculeInput]) -> Tuple[List[di
 
 def standardize_molecules_batch(molecules: List[MoleculeInput], remove_salts: bool = True, neutralize: bool = True) -> Tuple[List[dict], List[FailureRecord], dict]:
     rdkit_info = detect_rdkit()
-    has_rdkit = rdkit_info["installed"]
+    has_rdkit = bool(rdkit_info.get("installed") and rdkit_info.get("production_ready"))
 
     successful = []
     failures = []
@@ -278,7 +287,8 @@ def standardize_molecules_batch(molecules: List[MoleculeInput], remove_salts: bo
                     "was_modified": smiles != canonical_smi,
                     "warnings": warnings,
                     "engine": f"RDKit v{rdkit_info['version']}",
-                    "production_ready": True
+                    "production_ready": True,
+                    "result_origin": "COMPUTED"
                 })
             except Exception as e:
                 failures.append(FailureRecord(molecule_id=m.id, molecule_name=m.name, smiles=smiles, error_type="RDKitStandardizationException", error_message=str(e)))
@@ -297,7 +307,8 @@ def standardize_molecules_batch(molecules: List[MoleculeInput], remove_salts: bo
                 "was_modified": std_res["was_modified"],
                 "warnings": std_res["warnings"],
                 "engine": "AIDD Python Reference Engine (Non-Production Fallback)",
-                "production_ready": False
+                "production_ready": False,
+                "result_origin": "SIMULATED"
             })
 
     meta = {
@@ -327,5 +338,6 @@ def run_50_molecule_validation_suite() -> dict:
         "engine": meta["engine"],
         "production_ready": meta["production_ready"],
         "sample_results": successful[:5],
-        "validation_passed": len(failures) == 0
+        "rdkit_attestation": meta.get("rdkit_attestation", {}),
+        "validation_passed": bool(meta["production_ready"] and len(failures) == 0)
     }

@@ -8,6 +8,7 @@ import os
 import io
 import csv
 import json
+from enum import Enum
 from typing import Optional, List, Dict, Any
 from fastapi import FastAPI, HTTPException, Request, Response, Query, Body
 from fastapi.responses import HTMLResponse, PlainTextResponse, JSONResponse, FileResponse
@@ -79,11 +80,17 @@ class StandardizeRequest(BaseModel):
     max_logp: Optional[float] = 6.8
     notes: Optional[str] = ""
 
+
+class ResultOrigin(str, Enum):
+    COMPUTED = "COMPUTED"
+    IMPORTED = "IMPORTED"
+    SIMULATED = "SIMULATED"
+    DEMO = "DEMO"
+
 class DockingRequest(BaseModel):
     input_dataset_id: str
     experiment_name: Optional[str] = "AutoDock Vina Screen"
     docking_tool: Optional[str] = "AutoDock Vina"
-    tool_version: Optional[str] = "1.2.5"
     receptor: Optional[str] = "EGFR Kinase Domain (PDB: 1M17 / 4WKQ)"
     receptor_pdbqt: Optional[str] = None
     prepared_ligands: Optional[list] = None
@@ -98,7 +105,7 @@ class DockingRequest(BaseModel):
     size_z: Optional[float] = 20.0
     exhaustiveness: Optional[int] = 16
     seed: Optional[int] = 42
-    result_origin: Optional[str] = "IMPORTED"
+    result_origin: ResultOrigin = ResultOrigin.IMPORTED
     custom_scores_csv: Optional[str] = None
     notes: Optional[str] = ""
 
@@ -106,7 +113,7 @@ class ADMETRequest(BaseModel):
     input_dataset_id: str
     experiment_name: Optional[str] = "In Silico ADMET Profiling"
     tool_name: Optional[str] = "SwissADME & pkCSM Engine"
-    result_origin: Optional[str] = "IMPORTED"
+    result_origin: ResultOrigin = ResultOrigin.IMPORTED
     custom_admet_csv: Optional[str] = None
     notes: Optional[str] = ""
 
@@ -371,7 +378,6 @@ async def run_docking(project_id: str, data: DockingRequest):
             input_dataset_id=data.input_dataset_id,
             experiment_name=data.experiment_name or "AutoDock Vina Screen",
             docking_tool=data.docking_tool or "AutoDock Vina",
-            tool_version=data.tool_version or "1.2.5",
             receptor=data.receptor or "EGFR Kinase Domain (PDB: 1M17 / 4WKQ)",
             grid_center=data.grid_center or "x=22.0, y=0.5, z=52.8",
             grid_size=data.grid_size or "20 x 20 x 20 Å",
@@ -383,7 +389,7 @@ async def run_docking(project_id: str, data: DockingRequest):
             size_z=data.size_z or 20.0,
             exhaustiveness=data.exhaustiveness or 16,
             seed=data.seed or 42,
-            result_origin=data.result_origin or "IMPORTED",
+            result_origin=data.result_origin.value,
             custom_scores_csv=data.custom_scores_csv,
             notes=data.notes or "",
             receptor_pdbqt=data.receptor_pdbqt,
@@ -401,7 +407,7 @@ async def run_admet(project_id: str, data: ADMETRequest):
             input_dataset_id=data.input_dataset_id,
             experiment_name=data.experiment_name or "In Silico ADMET Profiling",
             tool_name=data.tool_name or "SwissADME & pkCSM Engine",
-            result_origin=data.result_origin or "IMPORTED",
+            result_origin=data.result_origin.value,
             custom_admet_csv=data.custom_admet_csv,
             notes=data.notes or ""
         )
@@ -496,7 +502,7 @@ def render_html_report(report: dict) -> str:
     ])
 
     exp_rows = "".join([
-        f"<tr><td><b>{e['name']}</b></td><td><code>{e['tool']} v{e['tool_version']}</code></td><td>{e['stage']}</td><td><span class='badge badge-{e['status']}'>{e['status']}</span></td><td>{e['duration_seconds']}s</td><td>{e['molecules_in']} in / {e['molecules_out']} out</td><td>{e.get('molecules_failed', 0)} failed</td></tr>"
+        f"<tr><td><b>{e['name']}</b></td><td><code>{e['tool']} — {e['tool_version']}</code></td><td>{e['stage']}</td><td><span class='badge badge-{e['status']}'>{e['status']}</span></td><td>{e['duration_seconds']}s</td><td>{e['molecules_in']} in / {e['molecules_out']} out</td><td>{e.get('molecules_failed', 0)} failed</td></tr>"
         for e in experiments
     ])
 
@@ -511,7 +517,7 @@ def render_html_report(report: dict) -> str:
     ]) if decisions else "<p class='text-muted'>No research decisions logged yet.</p>"
 
     cand_rows = "".join([
-        f"<tr><td><b>#{c['rank_position']}</b></td><td><b>{c['molecule_name']}</b><br><code>{c['molecule_id']}</code></td><td><span class='badge badge-tier'>{c['tier']}</span></td><td><span class='badge badge-origin'>{c.get('result_origin', 'COMPUTED')}</span></td><td><b>{c['composite_score']:.1f}</b></td><td>{c.get('docking_score', 'N/A')} kcal/mol</td><td>{c.get('admet_risk_level', 'N/A')}</td><td>{c['molecular_weight']} Da</td><td>{c['logp']}</td><td>{c['tpsa']} Å²</td></tr>"
+        f"<tr><td><b>#{c['rank_position']}</b></td><td><b>{c['molecule_name']}</b><br><code>{c['molecule_id']}</code></td><td><span class='badge badge-tier'>{c['tier']}</span></td><td><span class='badge badge-origin'>{c.get('result_origin') or 'UNKNOWN'}</span></td><td><b>{c['composite_score']:.1f}</b></td><td>{c.get('docking_score', 'N/A')} kcal/mol</td><td>{c.get('admet_risk_level', 'N/A')}</td><td>{c['molecular_weight']} Da</td><td>{c['logp']}</td><td>{c['tpsa']} Å²</td></tr>"
         for c in candidates
     ]) if candidates else "<tr><td colspan='10' class='text-muted'>No candidates ranked yet.</td></tr>"
 
@@ -621,7 +627,7 @@ def render_html_report(report: dict) -> str:
         </table>
 
         <div style="margin-top: 40px; padding-top: 20px; border-top: 1px solid #1E293B; font-size: 11px; color: #64748B; text-align: center;">
-            AIDD Lab OS — Provenance & Reproducibility Certified. All experimental parameters, datasets, and decision trails are cryptographically and relationally traceable.
+            AIDD Lab OS — Runtime and provenance report. Review origin labels, hashes, and validation status before interpreting results.
         </div>
     </div>
 </body>

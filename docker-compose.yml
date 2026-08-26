@@ -1,5 +1,3 @@
-version: '3.8'
-
 services:
   aidd-worker:
     build:
@@ -40,7 +38,7 @@ services:
     ports:
       - "8000:8000"
     environment:
-      - AIDD_DB_PATH=/tmp/aidd_lab.db
+      - AIDD_DB_PATH=/data/aidd_lab.db
       - AIDD_WORKER_URL=http://aidd-worker:8001
       - PORT=8000
     volumes:

@@ -25,6 +25,7 @@ artifacts/
 native_validation_report.json
 native_validation_report.html
 rdkit_full_validation.json
+/work/
 
 # Logs
 *.log

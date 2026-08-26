@@ -76,7 +76,7 @@ worker_modal_fn = """
             <div style="font-size: 12px;">
               <div><b>Installed:</b> ${sw.rdkit && sw.rdkit.installed ? '<span style="color: #10B981;">YES (Native C++)</span>' : '<span style="color: #F59E0B;">NO (Calibrated Pure-Python Reference Engine)</span>'}</div>
               <div style="margin-top: 4px;"><b>Version:</b> <code>${sw.rdkit && sw.rdkit.version ? sw.rdkit.version : 'Fallback v1.3.0'}</code></div>
-              <div style="margin-top: 4px;"><b>Production Certified:</b> ${sw.rdkit && sw.rdkit.production_ready ? '<span class="badge badge-pass">YES</span>' : '<span class="badge badge-fail">NO (Fallback Mode)</span>'}</div>
+              <div style="margin-top: 4px;"><b>Native RDKit Ready:</b> ${sw.rdkit && sw.rdkit.production_ready ? '<span class="badge badge-pass">YES</span>' : '<span class="badge badge-fail">NO (Fallback Mode)</span>'}</div>
             </div>
           </div>
 

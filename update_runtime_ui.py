@@ -105,7 +105,7 @@ runtime_view_fn = """
             <div><b>Status:</b> ${sw.rdkit && sw.rdkit.installed ? '<span style="color: #10B981; font-weight: 700;">READY (Native C++)</span>' : '<span style="color: #F59E0B; font-weight: 700;">FALLBACK MODE</span>'}</div>
             <div><b>Version:</b> <code>${sw.rdkit && sw.rdkit.version ? sw.rdkit.version : 'Python Kernel v1.4.0'}</code></div>
             <div><b>Backend:</b> <span style="font-size: 11px;">${sw.rdkit && sw.rdkit.backend ? sw.rdkit.backend : 'Pure-Python Reference Engine'}</span></div>
-            <div><b>Production Certified:</b> ${sw.rdkit && sw.rdkit.production_ready ? '<span class="badge badge-pass">YES</span>' : '<span class="badge badge-fail">NO (Fallback)</span>'}</div>
+            <div><b>Native RDKit Ready:</b> ${sw.rdkit && sw.rdkit.production_ready ? '<span class="badge badge-pass">YES</span>' : '<span class="badge badge-fail">NO (Fallback)</span>'}</div>
           </div>
         </div>
 

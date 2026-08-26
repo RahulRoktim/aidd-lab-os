@@ -1,6 +1,6 @@
 from app import worker_client
 """
-AIDD Lab OS - Production Hardened Scientific Service Layer
+AIDD Lab OS - Scientific Service Layer
 Handles molecule standardization, descriptor computation, immutable dataset lineage,
 AutoDock Vina docking import, ADMET data import, transparent candidate ranking,
 SHA-256 artifact hashing, experiment reproduction, and reproducibility bundle generation.
@@ -36,8 +36,21 @@ def compute_sha256(data: str or bytes) -> str:
 def get_system_environment_info() -> dict:
     engine_status = ScientificEngine.get_engine_status()
     worker_st = worker_client.get_worker_status()
-    has_native_rdk = engine_status["has_rdkit"] or (worker_st["connected"] and worker_st.get("scientific_software", {}).get("rdkit", {}).get("installed", False))
-    has_native_vina = worker_st["connected"] and worker_st.get("scientific_software", {}).get("autodock_vina", {}).get("installed", False)
+    worker_rdkit = worker_st.get("scientific_software", {}).get("rdkit", {})
+    has_native_rdk = engine_status["has_rdkit"] or bool(
+        worker_st["connected"]
+        and worker_rdkit.get("installed")
+        and worker_rdkit.get("production_ready")
+        and worker_rdkit.get("known_answer_verified")
+        and worker_rdkit.get("native_components_verified")
+    )
+    vina_capability = worker_st.get("scientific_software", {}).get("autodock_vina", {})
+    has_native_vina = bool(
+        worker_st["connected"]
+        and vina_capability.get("installed")
+        and vina_capability.get("identity_verified")
+        and vina_capability.get("production_ready")
+    )
 
     mode = "NATIVE" if (has_native_rdk and has_native_vina) else ("IMPORT_ONLY" if not worker_st["connected"] else "DEMO_FALLBACK")
 
@@ -46,14 +59,14 @@ def get_system_environment_info() -> dict:
         "architecture": platform.machine(),
         "python_version": platform.python_version(),
         "platform": platform.platform(),
-        "runtime": "AIDD Lab OS Production Scientific Kernel v1.4.0",
+        "runtime": "AIDD Lab OS Scientific Runtime v1.4.0",
         "execution_mode": mode,
         "cheminformatics_engine": "RDKit Native (C++)" if has_native_rdk else "AIDD Python Reference Engine (Non-Production Fallback)",
         "has_native_rdkit": has_native_rdk,
         "rdkit_version": engine_status["rdkit_version"] or (worker_st.get("scientific_software", {}).get("rdkit", {}).get("version")),
         "has_native_vina": has_native_vina,
         "vina_version": worker_st.get("scientific_software", {}).get("autodock_vina", {}).get("version"),
-        "engine_notice": "Running in pure-Python reference mode. For certified clinical CADD pipelines, native RDKit C++ binaries are required." if not has_native_rdk else "Production-certified RDKit native C++ kernel active.",
+        "engine_notice": "Running in pure-Python reference mode; descriptor results are simulated estimates." if not has_native_rdk else "Native RDKit C++ kernel active.",
         "scientific_worker": {
             "connected": worker_st["connected"],
             "worker_id": worker_st.get("worker_id"),
@@ -61,7 +74,7 @@ def get_system_environment_info() -> dict:
             "status": worker_st["status"],
             "capabilities": worker_st.get("scientific_software", {})
         },
-        "hardware": "x86_64 High-Performance Compute Cluster"
+        "hardware": platform.machine()
     }
     env_dict["environment_sha256"] = hashlib.sha256(json.dumps(env_dict, sort_keys=True).encode('utf-8')).hexdigest()
     return env_dict
@@ -214,6 +227,18 @@ def get_experiment_detail(experiment_id: str) -> Optional[dict]:
         ).fetchall()
         res["artifacts"] = [dict(a) for a in artifacts]
 
+        docking_results = conn.execute(
+            "SELECT * FROM docking_results WHERE experiment_id = ? ORDER BY molecule_id ASC",
+            (experiment_id,)
+        ).fetchall()
+        res["docking_results"] = [dict(row) for row in docking_results]
+
+        admet_results = conn.execute(
+            "SELECT * FROM admet_results WHERE experiment_id = ? ORDER BY molecule_id ASC",
+            (experiment_id,)
+        ).fetchall()
+        res["admet_results"] = [dict(row) for row in admet_results]
+
         upstream = conn.execute(
             "SELECT * FROM provenance_edges WHERE target_id = ? AND project_id = ?",
             (experiment_id, res["project_id"])
@@ -344,7 +369,7 @@ def import_molecules_from_csv_or_list(project_id: str,
             "sas_score": desc["sas_score"],
             "fingerprint_bits": json.dumps(fp),
             "svg_structure": svg,
-            "descriptor_origin": "COMPUTED",
+            "descriptor_origin": desc.get("result_origin") or "SIMULATED",
             "sha256_hash": mol_hash,
             "status": "active",
             "tier": "Unassigned",
@@ -702,7 +727,6 @@ def import_or_run_docking(project_id: str,
                           input_dataset_id: str,
                           experiment_name: str = "AutoDock Vina Screen",
                           docking_tool: str = "AutoDock Vina",
-                          tool_version: str = "1.2.5",
                           receptor: str = "EGFR Kinase Domain (PDB: 1M17 / 4WKQ)",
                           grid_center: str = "x=22.0, y=0.5, z=52.8",
                           grid_size: str = "20 x 20 x 20 Å",
@@ -725,6 +749,14 @@ def import_or_run_docking(project_id: str,
     if not project or not in_ds:
         raise ValueError("Project or input dataset not found")
 
+    result_origin = (result_origin or "").upper()
+    if result_origin not in {"COMPUTED", "IMPORTED", "SIMULATED", "DEMO"}:
+        raise ValueError("result_origin must be one of COMPUTED, IMPORTED, SIMULATED, or DEMO")
+    if result_origin == "COMPUTED" and custom_scores_csv:
+        raise ValueError("COMPUTED docking cannot accept imported score data")
+    if result_origin == "IMPORTED" and not custom_scores_csv:
+        raise ValueError("IMPORTED docking requires custom_scores_csv; scores are never synthesized")
+
     exp_id = gen_id("exp")
     start_ts = now_iso()
     start_time = time.time()
@@ -733,17 +765,52 @@ def import_or_run_docking(project_id: str,
 
     # NEW LOGIC: Native Worker Integration
     worker_job_id = None
+    worker_id = None
     worker_env_hash = None
     worker_is_native = False
     reproducibility_hash = None
     exit_code = None
     worker_error = None
+    vina_binary_sha256 = None
+    vina_expected_binary_sha256 = None
+    vina_binary_digest_verified = False
+    vina_path = None
+    vina_expected_path = None
+    vina_path_verified = False
+    vina_package_metadata_verified = False
+    vina_version_output_sha256 = None
+    stdout_sha256 = None
+    output_pdbqt_hashes = []
+    prepared_ligand_attestations = []
 
-    receptor_hash = compute_sha256(f"{receptor}:{grid_center}:{grid_size}:{exhaustiveness}")
+    if result_origin == "IMPORTED":
+        actual_tool = docking_tool or "Imported docking data"
+        actual_tool_version = "imported-unspecified"
+    elif result_origin == "SIMULATED":
+        actual_tool = "AIDD docking descriptor heuristic"
+        actual_tool_version = "simulation-v1"
+    elif result_origin == "DEMO":
+        actual_tool = "AIDD docking demo fixture"
+        actual_tool_version = "demo-fixture-v1"
+    else:
+        actual_tool = "AutoDock Vina"
+        actual_tool_version = "unverified"
+
+    receptor_hash = compute_sha256(receptor_pdbqt) if receptor_pdbqt else compute_sha256(f"{receptor}:{grid_center}:{grid_size}:{exhaustiveness}")
     if result_origin == "COMPUTED":
         from app.worker_client import submit_docking_job
         if not receptor_pdbqt or not prepared_ligands:
             raise ValueError("Native execution requires explicit receptor_pdbqt and prepared_ligands in the request.")
+        dataset_molecule_ids = {m["id"] for m in in_ds["molecules"]}
+        prepared_ids = [ligand.get("id") for ligand in prepared_ligands if isinstance(ligand, dict)]
+        if len(prepared_ids) != len(prepared_ligands) or len(set(prepared_ids)) != len(prepared_ids):
+            raise ValueError("Each prepared ligand requires one unique explicit ID")
+        if set(prepared_ids) != dataset_molecule_ids:
+            missing = sorted(dataset_molecule_ids - set(prepared_ids))
+            unknown = sorted(set(prepared_ids) - dataset_molecule_ids)
+            raise ValueError(
+                f"Prepared ligand IDs must exactly match the input dataset; missing={missing}, unknown={unknown}"
+            )
 
         search_box = {
             "center_x": center_x,
@@ -764,78 +831,197 @@ def import_or_run_docking(project_id: str,
             experiment_id=exp_id
         )
 
-        if succ and worker_res.get("status") == "COMPLETED" and worker_res.get("exit_code") == 0 and len(worker_res.get("results", [])) > 0:
-            if not worker_res.get("failures") and all(r.get("result_origin") == "COMPUTED" for r in worker_res.get("results", [])):
-                worker_job_id = worker_res.get("job_id")
-                worker_env_hash = worker_res.get("environment_sha256")
-                worker_is_native = True
-                reproducibility_hash = worker_res.get("reproducibility_hash")
-                exit_code = worker_res.get("exit_code")
+        worker_metrics = worker_res.get("metrics", {}) if isinstance(worker_res, dict) else {}
+        worker_results = worker_res.get("results", []) if isinstance(worker_res, dict) else []
+        worker_prepared_attestations = worker_metrics.get("prepared_ligand_attestations") or []
+        prepared_attestation_by_id = {
+            attestation.get("prepared_ligand_id"): attestation
+            for attestation in worker_prepared_attestations
+            if isinstance(attestation, dict) and attestation.get("prepared_ligand_id")
+        }
+        strict_native_success = bool(
+            succ
+            and isinstance(worker_res, dict)
+            and worker_res.get("status") == "COMPLETED"
+            and worker_res.get("exit_code") == 0
+            and worker_res.get("production_ready") is True
+            and worker_res.get("execution_mode") == "NATIVE"
+            and worker_res.get("tool") == "AutoDock Vina"
+            and isinstance(worker_res.get("tool_version"), str)
+            and worker_res.get("tool_version", "").lower().startswith("autodock vina")
+            and worker_metrics.get("vina_identity_verified") is True
+            and worker_metrics.get("vina_binary_sha256")
+            and worker_metrics.get("vina_expected_binary_sha256")
+            and worker_metrics.get("vina_binary_sha256") == worker_metrics.get("vina_expected_binary_sha256")
+            and worker_metrics.get("vina_binary_digest_verified") is True
+            and worker_metrics.get("vina_path") == worker_metrics.get("vina_expected_path")
+            and worker_metrics.get("vina_path_verified") is True
+            and worker_metrics.get("vina_package_metadata_verified") is True
+            and worker_metrics.get("stdout_sha256")
+            and worker_metrics.get("output_pdbqt_hashes")
+            and len(prepared_attestation_by_id) == len(worker_prepared_attestations)
+            and worker_res.get("worker_id")
+            and worker_res.get("reproducibility_hash")
+            and worker_results
+            and not worker_res.get("failures")
+            and all(
+                r.get("result_origin") == "COMPUTED"
+                and r.get("molecule_id")
+                and r.get("docking_score") is not None
+                and r.get("output_pdbqt_hash")
+                and r.get("receptor_hash")
+                and r.get("ligand_hash")
+                and r.get("tool") == worker_res.get("tool")
+                and r.get("tool_version") == worker_res.get("tool_version")
+                and r.get("vina_binary_sha256") == worker_metrics.get("vina_binary_sha256")
+                and r.get("vina_expected_binary_sha256") == worker_metrics.get("vina_expected_binary_sha256")
+                and r.get("vina_binary_digest_verified") is True
+                and r.get("vina_path_verified") is True
+                and r.get("vina_package_metadata_verified") is True
+                and r.get("output_created_after_start") is True
+                and r.get("output_path_verified") is True
+                and r.get("ligand_output_integrity", {}).get("verified") is True
+                and r.get("prepared_ligand_id") == r.get("molecule_id")
+                and r.get("molecule_id") in dataset_molecule_ids
+                and r.get("output_pdbqt_hash") in worker_metrics.get("output_pdbqt_hashes", [])
+                and prepared_attestation_by_id.get(r.get("molecule_id"), {}).get("ligand_hash") == r.get("ligand_hash")
+                and prepared_attestation_by_id.get(r.get("molecule_id"), {}).get("output_pdbqt_hash") == r.get("output_pdbqt_hash")
+                and prepared_attestation_by_id.get(r.get("molecule_id"), {}).get("ligand_output_integrity", {}).get("verified") is True
+                for r in worker_results
+            )
+            and {r.get("molecule_id") for r in worker_results} == dataset_molecule_ids
+            and set(prepared_attestation_by_id) == dataset_molecule_ids
+        )
 
-                # Map results
-                for result in worker_res.get("results", []):
-                    m_id = result.get("molecule_id")
-                    score = result.get("docking_score")
-                    if m_id and score is not None:
-                        docking_data[m_id] = {
-                            "score": float(score),
-                            "best_affinity_kcal_mol": result.get("best_affinity_kcal_mol"),
-                            "poses_count": result.get("poses_count"),
-                            "receptor_hash": result.get("receptor_hash"),
-                            "ligand_hash": result.get("ligand_hash"),
-                            "tool": result.get("tool")
-                        }
-            else:
-                worker_error = "Native execution produced simulated/failed results."
-                exit_code = None
+        if strict_native_success:
+            worker_job_id = worker_res.get("job_id")
+            worker_id = worker_res.get("worker_id")
+            worker_env_hash = worker_res.get("environment_sha256")
+            worker_is_native = True
+            reproducibility_hash = worker_res.get("reproducibility_hash")
+            exit_code = worker_res.get("exit_code")
+            actual_tool = worker_res["tool"]
+            actual_tool_version = worker_res["tool_version"]
+            vina_binary_sha256 = worker_metrics.get("vina_binary_sha256")
+            vina_expected_binary_sha256 = worker_metrics.get("vina_expected_binary_sha256")
+            vina_binary_digest_verified = worker_metrics.get("vina_binary_digest_verified", False)
+            vina_path = worker_metrics.get("vina_path")
+            vina_expected_path = worker_metrics.get("vina_expected_path")
+            vina_path_verified = worker_metrics.get("vina_path_verified", False)
+            vina_package_metadata_verified = worker_metrics.get("vina_package_metadata_verified", False)
+            vina_version_output_sha256 = worker_metrics.get("vina_version_output_sha256")
+            stdout_sha256 = worker_metrics.get("stdout_sha256")
+            output_pdbqt_hashes = worker_metrics.get("output_pdbqt_hashes") or []
+            prepared_ligand_attestations = worker_metrics.get("prepared_ligand_attestations") or []
+
+            for result in worker_results:
+                m_id = result.get("molecule_id")
+                score = result.get("docking_score")
+                if m_id and score is not None:
+                    docking_data[m_id] = {
+                        "score": float(score),
+                        "best_affinity_kcal_mol": result.get("best_affinity_kcal_mol"),
+                        "poses_count": result.get("poses_count"),
+                        "receptor_hash": result.get("receptor_hash"),
+                        "ligand_hash": result.get("ligand_hash"),
+                        "output_pdbqt_hash": result.get("output_pdbqt_hash"),
+                        "stdout_sha256": result.get("stdout_sha256"),
+                        "config_sha256": result.get("config_sha256"),
+                        "prepared_ligand_id": result.get("prepared_ligand_id"),
+                        "prepared_ligand_name": result.get("prepared_ligand_name"),
+                        "ligand_output_integrity": result.get("ligand_output_integrity"),
+                    }
         else:
-            worker_error = worker_res.get("failures", "Unknown worker error") if isinstance(worker_res, dict) else worker_res
             exit_code = worker_res.get("exit_code") if isinstance(worker_res, dict) else None
+            failures = worker_res.get("failures") if isinstance(worker_res, dict) else None
+            worker_error = failures or (
+                f"Worker response failed strict native attestation: status={worker_res.get('status')}, "
+                f"exit_code={worker_res.get('exit_code')}, tool={worker_res.get('tool')}, "
+                f"version={worker_res.get('tool_version')}"
+                if isinstance(worker_res, dict)
+                else str(worker_res)
+            )
+
+    elif result_origin == "IMPORTED":
+        reader = csv.DictReader(io.StringIO(custom_scores_csv.strip()))
+        for row in reader:
+            m_id = row.get("molecule_id") or row.get("id")
+            score_str = row.get("docking_score") or row.get("score") or row.get("affinity")
+            if not m_id or score_str in (None, ""):
+                raise ValueError("Each imported docking row requires molecule_id and docking_score")
+            try:
+                docking_data[m_id] = {"score": float(score_str)}
+            except (TypeError, ValueError) as exc:
+                raise ValueError(f"Invalid imported docking score for {m_id}: {score_str}") from exc
+
+        dataset_ids = {m["id"] for m in in_ds["molecules"]}
+        unknown_ids = sorted(set(docking_data) - dataset_ids)
+        missing_ids = sorted(dataset_ids - set(docking_data))
+        if unknown_ids:
+            raise ValueError(f"Imported docking data contains molecule IDs outside the input dataset: {', '.join(unknown_ids)}")
+        if missing_ids:
+            raise ValueError(f"Imported docking data is incomplete; missing scores for: {', '.join(missing_ids)}")
 
     else:
-        # Fallback IMPORTED logic
-        if custom_scores_csv:
-            reader = csv.DictReader(io.StringIO(custom_scores_csv.strip()))
-            for row in reader:
-                m_id = row.get("molecule_id") or row.get("id")
-                score_str = row.get("docking_score") or row.get("score") or row.get("affinity")
-                if m_id and score_str:
-                    try:
-                        docking_data[m_id] = float(score_str)
-                    except:
-                        pass
-
         for m in in_ds["molecules"]:
             m_id = m["id"]
-            if m_id not in docking_data:
-                n_rings = m.get("num_rings", 3)
-                hba = m.get("hba", 5)
-                hbd = m.get("hbd", 1)
-                logp = m.get("logp", 3.0)
-                base_score = -5.0 - (n_rings * 0.8) - ((hba+hbd) * 0.2)
-                noise = ((hash(m_id) % 20) / 10.0) - 1.0
-                score = round(max(-14.0, min(-4.0, base_score + noise)), 1)
-                docking_data[m_id] = score
+            n_rings = m.get("num_rings", 3)
+            hba = m.get("hba", 5)
+            hbd = m.get("hbd", 1)
+            base_score = -5.0 - (n_rings * 0.8) - ((hba + hbd) * 0.2)
+            score_bucket = int(hashlib.sha256(m_id.encode("utf-8")).hexdigest()[:8], 16) % 20
+            noise = (score_bucket / 10.0) - 1.0
+            docking_data[m_id] = {"score": round(max(-14.0, min(-4.0, base_score + noise)), 1)}
+
+    if reproducibility_hash is None and docking_data:
+        reproducibility_hash = compute_sha256(json.dumps({
+            "origin": result_origin,
+            "tool": actual_tool,
+            "tool_version": actual_tool_version,
+            "receptor_hash": receptor_hash,
+            "parameters": {
+                "center_x": center_x, "center_y": center_y, "center_z": center_z,
+                "size_x": size_x, "size_y": size_y, "size_z": size_z,
+                "exhaustiveness": exhaustiveness, "num_modes": num_modes, "seed": seed,
+            },
+            "scores": {key: value["score"] for key, value in sorted(docking_data.items())},
+        }, sort_keys=True))
+
+    duration = round(time.time() - start_time, 2)
+    final_status = 'completed' if worker_error is None and docking_data else 'failed'
+    best_score = min((value["score"] for value in docking_data.values()), default=None) if final_status == "completed" else None
 
     # Process molecules
     conn = get_db_connection()
     c = conn.cursor()
-    best_score = 999.0
-
-    duration = round(time.time() - start_time, 2)
-    final_status = 'completed' if worker_error is None else 'failed'
 
     metrics = {
-        "molecules_docked": len(docking_data) if result_origin == "COMPUTED" else len(in_ds["molecules"]),
+        "molecules_docked": len(docking_data),
         "grid_center": grid_center,
         "grid_size": grid_size,
         "exhaustiveness": exhaustiveness,
         "result_origin": result_origin,
         "duration_seconds": duration,
         "worker_job_id": worker_job_id,
+        "worker_id": worker_id,
         "environment_sha256": worker_env_hash,
         "is_native_vina_executed": worker_is_native,
+        "tool": actual_tool,
+        "tool_version": actual_tool_version,
+        "vina_binary_sha256": vina_binary_sha256,
+        "vina_expected_binary_sha256": vina_expected_binary_sha256,
+        "vina_binary_digest_verified": vina_binary_digest_verified,
+        "vina_path": vina_path,
+        "vina_expected_path": vina_expected_path,
+        "vina_path_verified": vina_path_verified,
+        "vina_package_metadata_verified": vina_package_metadata_verified,
+        "vina_version_output_sha256": vina_version_output_sha256,
+        "stdout_sha256": stdout_sha256,
+        "output_pdbqt_hashes": output_pdbqt_hashes,
+        "prepared_ligand_attestations": prepared_ligand_attestations,
         "reproducibility_hash": reproducibility_hash,
+        "best_docking_score": best_score,
+        "exit_code": exit_code,
         "error": str(worker_error) if worker_error else None
     }
 
@@ -848,13 +1034,13 @@ def import_or_run_docking(project_id: str,
         out_ds_id = gen_id("ds")
         out_ds_label = f"{project['name'].replace(' ', '_')}_dataset_v{next_v}"
 
-        passed_mols = [m for m in in_ds["molecules"] if result_origin != "COMPUTED" or m["id"] in docking_data]
+        passed_mols = [m for m in in_ds["molecules"] if m["id"] in docking_data]
         dataset_content_hash = compute_sha256("".join([m['id'] for m in passed_mols]))
 
         c.execute('''INSERT INTO datasets (id, project_id, name, version, version_label, parent_dataset_id, experiment_id, description, stage, molecule_count, sha256_hash, created_at)
                      VALUES (?, ?, ?, ?, ?, ?, NULL, ?, 'Docking', ?, ?, ?)''',
                   (out_ds_id, project_id, f"Docked Dataset v{next_v}", next_v, out_ds_label, input_dataset_id,
-                   f"Docked against {receptor} using {docking_tool} ({result_origin}).", len(passed_mols), dataset_content_hash, now_iso()))
+                   f"Docking results for {receptor} using {actual_tool} ({result_origin}).", len(passed_mols), dataset_content_hash, now_iso()))
 
         for m in passed_mols:
             c.execute("INSERT OR IGNORE INTO dataset_molecules (dataset_id, molecule_id, included_at) VALUES (?, ?, ?)",
@@ -867,18 +1053,20 @@ def import_or_run_docking(project_id: str,
     c.execute('''INSERT INTO experiments
                  (id, project_id, name, experiment_type, status, stage, input_dataset_id, output_dataset_id, tool, tool_version, started_at, completed_at, duration_seconds, molecules_in, molecules_out, molecules_failed, is_locked, reproduction_of_id, reproduction_match, environment_info, parameters, metrics, logs, warnings, notes, notes_log, reproducibility_manifest, created_at)
                  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
-              (exp_id, project_id, experiment_name, 'docking', final_status, 'Docking', input_dataset_id, out_ds_id, docking_tool, tool_version,
+              (exp_id, project_id, experiment_name, 'docking', final_status, 'Docking', input_dataset_id, out_ds_id, actual_tool, actual_tool_version,
                start_ts, now_iso(), duration, mols_in_count, mols_out_count, mols_failed_count, 1, None, None,
                json.dumps(get_system_environment_info()),
                json.dumps({
-                   "docking_tool": docking_tool, "tool_version": tool_version,
+                   "docking_tool": actual_tool, "tool_version": actual_tool_version,
                    "receptor": receptor, "grid_center": grid_center, "grid_size": grid_size, "exhaustiveness": exhaustiveness,
                    "seed": seed, "receptor_hash": receptor_hash, "result_origin": result_origin,
                    "center_x": center_x, "center_y": center_y, "center_z": center_z,
                    "size_x": size_x, "size_y": size_y, "size_z": size_z,
                    "num_modes": num_modes,
                    "receptor_pdbqt": receptor_pdbqt if result_origin == "COMPUTED" else None,
-                   "prepared_ligands": prepared_ligands if result_origin == "COMPUTED" else None
+                   "prepared_ligands": prepared_ligands if result_origin == "COMPUTED" else None,
+                   "source_file_sha256": compute_sha256(custom_scores_csv) if result_origin == "IMPORTED" else None,
+                   "custom_scores_csv": custom_scores_csv if result_origin == "IMPORTED" else None
                }),
                json.dumps(metrics), "", "", notes, json.dumps([]), "", start_ts))
 
@@ -892,50 +1080,20 @@ def import_or_run_docking(project_id: str,
         for m in in_ds["molecules"]:
             m_id = m["id"]
 
-            if result_origin == "COMPUTED" and m_id not in docking_data:
-                 continue
+            if m_id not in docking_data:
+                continue
 
-            if m_id in docking_data:
-                data = docking_data[m_id]
-                if isinstance(data, dict):
-                    score = data["score"]
-                    actual_rec_hash = data.get("receptor_hash")
-                    actual_lig_hash = data.get("ligand_hash")
-                    actual_poses_count = data.get("poses_count")
-                else:
-                    score = data
-                    actual_rec_hash = None
-                    actual_lig_hash = None
-                    actual_poses_count = None
-            else:
-                n_rings = m.get("num_rings", 3)
-                hba = m.get("hba", 5)
-                hbd = m.get("hbd", 1)
-                logp = m.get("logp", 3.0)
-                base_score = -5.0 - (n_rings * 0.8) - ((hba+hbd) * 0.2)
-                noise = ((hash(m_id) % 20) / 10.0) - 1.0
-                score = round(max(-14.0, min(-4.0, base_score + noise)), 1)
-                docking_data[m_id] = score
-                actual_rec_hash = None
-                actual_lig_hash = None
-                actual_poses_count = None
-
-            best_score = min(best_score, score)
+            data = docking_data[m_id]
+            score = data["score"]
+            actual_rec_hash = data.get("receptor_hash") or receptor_hash
+            actual_lig_hash = data.get("ligand_hash") or compute_sha256(m.get("smiles", ""))
+            actual_poses_count = data.get("poses_count")
 
             c.execute('''INSERT INTO docking_results
                          (id, project_id, molecule_id, experiment_id, docking_score, result_origin, receptor, docking_tool, pose_identifier, binding_site_coords, center_x, center_y, center_z, size_x, size_y, size_z, exhaustiveness, seed, vina_version, receptor_file_hash, ligand_file_hash, rmsd_lower_bound, rmsd_upper_bound, created_at)
                          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
-                      (gen_id("res"), project_id, m_id, exp_id, score, result_origin, receptor, docking_tool,
-                       f"pose_best_of_{actual_poses_count}" if actual_poses_count else None, None, center_x, center_y, center_z, size_x, size_y, size_z, exhaustiveness, seed, tool_version, actual_rec_hash, actual_lig_hash, None, None, now_iso()))
-
-    if best_score == 999.0:
-         best_score = None
-
-    metrics["best_docking_score"] = best_score
-    metrics["exit_code"] = exit_code
-
-    # Update experiments again with best_score
-    c.execute("UPDATE experiments SET metrics = ? WHERE id = ?", (json.dumps(metrics), exp_id))
+                      (gen_id("res"), project_id, m_id, exp_id, score, result_origin, receptor, actual_tool,
+                       f"pose_best_of_{actual_poses_count}" if actual_poses_count else None, None, center_x, center_y, center_z, size_x, size_y, size_z, exhaustiveness, seed, actual_tool_version, actual_rec_hash, actual_lig_hash, None, None, now_iso()))
 
     c.execute('''INSERT INTO provenance_edges (id, project_id, source_id, source_type, target_id, target_type, relation_type, metadata_json, created_at)
                  VALUES (?, ?, ?, 'dataset', ?, 'experiment', 'wasUsedBy', ?, ?)''',
@@ -962,7 +1120,7 @@ def import_or_run_docking(project_id: str,
         "status": final_status,
         "exit_code": exit_code,
         "best_docking_score": best_score,
-        "molecules_docked": len(docking_data) if result_origin == "COMPUTED" else len(in_ds["molecules"]),
+        "molecules_docked": len(docking_data),
         "metrics": metrics
     }
 
@@ -978,6 +1136,26 @@ def import_or_run_admet(project_id: str,
     if not project or not in_ds:
         raise ValueError("Project or input dataset not found")
 
+    result_origin = (result_origin or "").upper()
+    if result_origin not in {"COMPUTED", "IMPORTED", "SIMULATED", "DEMO"}:
+        raise ValueError("result_origin must be one of COMPUTED, IMPORTED, SIMULATED, or DEMO")
+    if result_origin == "COMPUTED":
+        raise ValueError("No native ADMET engine is configured; heuristic ADMET results cannot be labeled COMPUTED")
+    if result_origin == "IMPORTED" and not custom_admet_csv:
+        raise ValueError("IMPORTED ADMET requires custom_admet_csv; endpoint values are never synthesized")
+    if result_origin in {"SIMULATED", "DEMO"} and custom_admet_csv:
+        raise ValueError(f"{result_origin} ADMET cannot accept imported endpoint data")
+
+    if result_origin == "IMPORTED":
+        actual_tool_name = tool_name or "Imported ADMET data"
+        actual_tool_version = "imported-unspecified"
+    elif result_origin == "SIMULATED":
+        actual_tool_name = "AIDD ADMET descriptor heuristic"
+        actual_tool_version = "simulation-v1"
+    else:
+        actual_tool_name = "AIDD ADMET demo fixture"
+        actual_tool_version = "demo-fixture-v1"
+
     exp_id = gen_id("exp")
     start_ts = now_iso()
     start_time = time.time()
@@ -992,6 +1170,24 @@ def import_or_run_admet(project_id: str,
             mid = row.get("molecule_id") or row.get("id")
             if mid:
                 admet_map[mid] = row
+
+    if result_origin == "IMPORTED":
+        required_fields = {
+            "gi_absorption", "bbb_permeant", "cyp3a4_inhibitor", "cyp2d6_inhibitor",
+            "hepatotoxicity", "mutagenicity_ames", "herg_inhibition", "clearance_rate",
+            "bioavailability_score", "admet_risk_level", "confidence",
+        }
+        dataset_ids = {m["id"] for m in in_ds["molecules"]}
+        unknown_ids = sorted(set(admet_map) - dataset_ids)
+        missing_ids = sorted(dataset_ids - set(admet_map))
+        if unknown_ids:
+            raise ValueError(f"Imported ADMET data contains molecule IDs outside the input dataset: {', '.join(unknown_ids)}")
+        if missing_ids:
+            raise ValueError(f"Imported ADMET data is incomplete; missing rows for: {', '.join(missing_ids)}")
+        for mid, row in admet_map.items():
+            missing_fields = sorted(field for field in required_fields if row.get(field) in (None, ""))
+            if missing_fields:
+                raise ValueError(f"Imported ADMET row {mid} is missing fields: {', '.join(missing_fields)}")
 
     end_time = time.time()
     duration = round(end_time - start_time, 3)
@@ -1012,7 +1208,7 @@ def import_or_run_admet(project_id: str,
             (
                 out_ds_id, project_id, f"ADMET Dataset v{next_v}", next_v, out_ds_label,
                 input_dataset_id,
-                f"ADMET profiles evaluated via {tool_name} [{result_origin}]. Total {len(in_ds['molecules'])} molecules.",
+                f"ADMET records produced via {actual_tool_name} [{result_origin}]. Total {len(in_ds['molecules'])} molecules.",
                 len(in_ds["molecules"]), dataset_content_hash, end_ts
             )
         )
@@ -1024,23 +1220,25 @@ def import_or_run_admet(project_id: str,
             )
 
         parameters = {
-            "admet_tool": tool_name,
+            "admet_tool": actual_tool_name,
+            "tool_version": actual_tool_version,
             "result_origin": result_origin,
             "models_included": ["Gastrointestinal Absorption (BOILED-Egg)", "BBB Permeability", "CYP450 3A4/2D6 Inhibition", "Ames Mutagenicity", "hERG Cardiotoxicity"],
-            "source_file_sha256": source_hash or "InSilicoModelConsensus",
+            "source_file_sha256": source_hash or None,
+            "custom_admet_csv": custom_admet_csv if result_origin == "IMPORTED" else None,
             "input_dataset": in_ds["version_label"],
             "notes": notes
         }
         metrics = {
             "total_evaluated": len(in_ds["molecules"]),
             "result_origin": result_origin,
-            "high_gi_absorption_rate": "87.5%",
-            "low_admet_risk_count": len(in_ds["molecules"])
+            "high_gi_absorption_rate": None,
+            "low_admet_risk_count": None,
         }
         log_lines = [
-            f"[{start_ts}] [INFO] Ingesting ADMET profiling dataset using {tool_name} [Origin: {result_origin}]",
+            f"[{start_ts}] [INFO] Processing ADMET records using {actual_tool_name} [Origin: {result_origin}]",
             f"[{start_ts}] [INFO] Input dataset: {in_ds['version_label']} ({len(in_ds['molecules'])} compounds)",
-            f"[{end_ts}] [INFO] Attached pharmacokinetic and toxicity endpoints with scientific origin tags",
+            f"[{end_ts}] [INFO] Attached pharmacokinetic and toxicity endpoints with explicit origin tags",
             f"[{end_ts}] [INFO] Output dataset created: {out_ds_label}"
         ]
 
@@ -1048,11 +1246,11 @@ def import_or_run_admet(project_id: str,
             """
             INSERT INTO experiments
             (id, project_id, name, experiment_type, status, stage, input_dataset_id, output_dataset_id, tool, tool_version, started_at, completed_at, duration_seconds, molecules_in, molecules_out, molecules_failed, is_locked, reproduction_of_id, reproduction_match, environment_info, parameters, metrics, logs, warnings, notes, notes_log, reproducibility_manifest, created_at)
-            VALUES (?, ?, ?, 'admet', 'completed', 'ADMET', ?, ?, ?, '2024.1', ?, ?, ?, ?, ?, 0, 1, NULL, NULL, ?, ?, ?, ?, '', ?, '[]', '', ?)
+            VALUES (?, ?, ?, 'admet', 'completed', 'ADMET', ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, NULL, NULL, ?, ?, ?, ?, '', ?, '[]', '', ?)
             """,
             (
                 exp_id, project_id, experiment_name, input_dataset_id, out_ds_id,
-                tool_name, start_ts, end_ts, duration, len(in_ds["molecules"]), len(in_ds["molecules"]),
+                actual_tool_name, actual_tool_version, start_ts, end_ts, duration, len(in_ds["molecules"]), len(in_ds["molecules"]),
                 json.dumps(get_system_environment_info()), json.dumps(parameters), json.dumps(metrics),
                 "\n".join(log_lines), notes, start_ts
             )
@@ -1060,6 +1258,8 @@ def import_or_run_admet(project_id: str,
 
         conn.execute("UPDATE datasets SET experiment_id = ? WHERE id = ?", (exp_id, out_ds_id))
 
+        high_gi_count = 0
+        low_risk_count = 0
         for m in in_ds["molecules"]:
             mid = m["id"]
             if mid in admet_map:
@@ -1101,20 +1301,29 @@ def import_or_run_admet(project_id: str,
                 elif risk_points <= 3: risk = "Moderate Risk"
                 else: risk = "High Risk"
 
+            if gi == "High":
+                high_gi_count += 1
+            if risk == "Low Risk":
+                low_risk_count += 1
+
             conn.execute(
                 """
                 INSERT OR REPLACE INTO admet_results
                 (id, project_id, molecule_id, experiment_id, result_origin, provider_tool, model_version, endpoint_name, confidence_score, units, source_file_hash, gi_absorption, bbb_permeant, cyp3a4_inhibitor, cyp2d6_inhibitor, hepatotoxicity, mutagenicity_ames, herg_inhibition, clearance_rate, bioavailability_score, admet_risk_level, risk_details, disclaimer, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, '2024.1', 'ConsensusADMET', ?, 'categorical/mL/min/kg', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'Computational prediction. In vitro validation required.', ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, 'ConsensusADMET', ?, 'categorical/mL/min/kg', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'Computational prediction. In vitro validation required.', ?)
                 """,
                 (
                     gen_id("admet"), project_id, mid, exp_id, result_origin,
-                    tool_name, conf, source_hash or "ConsensusHash",
+                    actual_tool_name, actual_tool_version, conf, source_hash or None,
                     gi, bbb, cyp3a4, cyp2d6, hep, ames, herg, clr, bio, risk,
                     json.dumps({"gi": gi, "bbb": bbb, "cyp3a4": cyp3a4, "cyp2d6": cyp2d6, "hep": hep, "ames": ames, "herg": herg}),
                     end_ts
                 )
             )
+
+        metrics["high_gi_absorption_rate"] = round((high_gi_count / len(in_ds["molecules"])) * 100.0, 1) if in_ds["molecules"] else 0.0
+        metrics["low_admet_risk_count"] = low_risk_count
+        conn.execute("UPDATE experiments SET metrics = ?, is_locked = 1 WHERE id = ?", (json.dumps(metrics), exp_id))
 
         conn.execute(
             """
@@ -1216,6 +1425,8 @@ def calculate_candidate_rankings(project_id: str,
             dock_score = m["docking_score"]
             risk = m["admet_risk_level"]
             qed_val = m["qed"] if m["qed"] is not None else 0.5
+            input_origins = {m["docking_origin"], m["admet_origin"], m["descriptor_origin"]}
+            ranking_origin = "DEMO" if "DEMO" in input_origins else "SIMULATED"
 
             is_complete = 1
             missing_fields = []
@@ -1291,7 +1502,8 @@ def calculate_candidate_rankings(project_id: str,
                 "weighted_components": weighted_components,
                 "is_data_complete": is_complete,
                 "docking_score": dock_score,
-                "admet_risk_level": risk
+                "admet_risk_level": risk,
+                "result_origin": ranking_origin,
             })
 
         scores_list.sort(key=lambda x: x["composite_score"], reverse=True)
@@ -1307,6 +1519,7 @@ def calculate_candidate_rankings(project_id: str,
         end_time = time.time()
         duration = round(end_time - start_time, 3)
         end_ts = now_iso()
+        experiment_origin = "DEMO" if any(s["result_origin"] == "DEMO" for s in scores_list) else "SIMULATED"
 
         parameters = {
             "weights": {"docking": w_dock, "qsar": w_qsar, "admet": w_admet, "druglikeness": w_qed},
@@ -1314,7 +1527,8 @@ def calculate_candidate_rankings(project_id: str,
             "normalization_method": normalization_doc,
             "scoring_formula": formula_str,
             "tier_thresholds": "Lead >= 78, Backup >= 65, Follow-up >= 50",
-            "notes": notes
+            "notes": notes,
+            "result_origin": experiment_origin,
         }
         leads_count = sum(1 for s in scores_list if s["tier"] == "Lead Candidate")
         backups_count = sum(1 for s in scores_list if s["tier"] == "Backup Lead")
@@ -1337,10 +1551,10 @@ def calculate_candidate_rankings(project_id: str,
             """
             INSERT INTO experiments
             (id, project_id, name, experiment_type, status, stage, input_dataset_id, output_dataset_id, tool, tool_version, started_at, completed_at, duration_seconds, molecules_in, molecules_out, molecules_failed, is_locked, reproduction_of_id, reproduction_match, environment_info, parameters, metrics, logs, warnings, notes, notes_log, reproducibility_manifest, created_at)
-            VALUES (?, ?, ?, 'candidate_ranking', 'completed', 'Candidate Selection', ?, NULL, 'AIDD Multi-Objective Optimizer', '1.2.0', ?, ?, ?, ?, ?, 0, 1, NULL, NULL, ?, ?, ?, ?, '', ?, '[]', '', ?)
+            VALUES (?, ?, ?, 'candidate_ranking', 'completed', 'Candidate Selection', ?, NULL, 'AIDD Heuristic Multi-Objective Optimizer', ?, ?, ?, ?, ?, ?, 0, 1, NULL, NULL, ?, ?, ?, ?, '', ?, '[]', '', ?)
             """,
             (
-                exp_id, project_id, experiment_name, input_dataset_id,
+                exp_id, project_id, experiment_name, input_dataset_id, "demo-fixture-v1" if experiment_origin == "DEMO" else "simulation-v1",
                 start_ts, end_ts, duration, len(scores_list), len(scores_list),
                 json.dumps(get_system_environment_info()), json.dumps(parameters), json.dumps(metrics),
                 "\n".join(log_lines), notes, start_ts
@@ -1353,11 +1567,11 @@ def calculate_candidate_rankings(project_id: str,
                 """
                 INSERT OR REPLACE INTO candidate_scores
                 (id, project_id, molecule_id, experiment_id, composite_score, result_origin, docking_component, qsar_component, admet_component, druglikeness_component, weights_applied, formula_expression, normalization_method, raw_components_json, weighted_components_json, missing_data_policy, is_data_complete, rank_position, tier, selection_notes, updated_at)
-                VALUES (?, ?, ?, ?, ?, 'COMPUTED', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     gen_id("cand"), project_id, s["molecule_id"], exp_id,
-                    s["composite_score"],
+                    s["composite_score"], s["result_origin"],
                     wc["docking_contrib"], wc["qsar_contrib"], wc["admet_contrib"], wc["qed_contrib"],
                     json.dumps({"docking": w_dock, "qsar": w_qsar, "admet": w_admet, "druglikeness": w_qed}),
                     formula_str, normalization_doc,
@@ -1468,7 +1682,6 @@ def reproduce_experiment(experiment_id: str) -> dict:
             input_dataset_id=in_ds_id,
             experiment_name=new_name,
             docking_tool=params.get("docking_tool", "AutoDock Vina"),
-            tool_version=orig_exp["tool_version"],
             receptor=params.get("receptor", "EGFR Kinase Domain"),
             grid_center=params.get("grid_center", "x=22.0, y=0.5, z=52.8"),
             grid_size=params.get("grid_size", "20 x 20 x 20 Å"),
@@ -1481,6 +1694,7 @@ def reproduce_experiment(experiment_id: str) -> dict:
             exhaustiveness=params.get("exhaustiveness", 16),
             seed=params.get("seed", 42),
             result_origin=params.get("result_origin", "IMPORTED"),
+            custom_scores_csv=params.get("custom_scores_csv"),
             notes=f"Reproduced from experiment {experiment_id}",
             receptor_pdbqt=params.get("receptor_pdbqt"),
             prepared_ligands=params.get("prepared_ligands"),
@@ -1493,6 +1707,7 @@ def reproduce_experiment(experiment_id: str) -> dict:
             experiment_name=new_name,
             tool_name=orig_exp["tool"],
             result_origin=params.get("result_origin", "IMPORTED"),
+            custom_admet_csv=params.get("custom_admet_csv"),
             notes=f"Reproduced from experiment {experiment_id}"
         )
     elif exp_type == "candidate_ranking":
@@ -1518,6 +1733,61 @@ def reproduce_experiment(experiment_id: str) -> dict:
     if orig_exp.get("molecules_failed") != new_exp.get("molecules_failed"):
         match = 0
         diff_reasons.append(f"Failures count mismatch: {orig_exp.get('molecules_failed')} vs {new_exp.get('molecules_failed')}")
+
+    if orig_exp.get("tool") != new_exp.get("tool"):
+        match = 0
+        diff_reasons.append(f"Tool mismatch: {orig_exp.get('tool')} vs {new_exp.get('tool')}")
+    if orig_exp.get("tool_version") != new_exp.get("tool_version"):
+        match = 0
+        diff_reasons.append(f"Tool version mismatch: {orig_exp.get('tool_version')} vs {new_exp.get('tool_version')}")
+
+    if exp_type == "docking":
+        relevant_parameters = (
+            "result_origin", "receptor_hash", "center_x", "center_y", "center_z",
+            "size_x", "size_y", "size_z", "exhaustiveness", "num_modes", "seed",
+        )
+        new_params = new_exp.get("parameters", {})
+        for key in relevant_parameters:
+            if params.get(key) != new_params.get(key):
+                match = 0
+                diff_reasons.append(f"Docking parameter {key} mismatch: {params.get(key)!r} vs {new_params.get(key)!r}")
+
+        original_rows = {row["molecule_id"]: row for row in orig_exp.get("docking_results", [])}
+        reproduced_rows = {row["molecule_id"]: row for row in new_exp.get("docking_results", [])}
+        for molecule_id in sorted(set(original_rows) | set(reproduced_rows)):
+            original_row = original_rows.get(molecule_id)
+            reproduced_row = reproduced_rows.get(molecule_id)
+            if original_row is None or reproduced_row is None:
+                match = 0
+                diff_reasons.append(f"Docking result presence mismatch for {molecule_id}")
+                continue
+            original_score = float(original_row["docking_score"])
+            reproduced_score = float(reproduced_row["docking_score"])
+            if not math.isclose(original_score, reproduced_score, rel_tol=0.0, abs_tol=1e-6):
+                match = 0
+                diff_reasons.append(f"Docking score mismatch for {molecule_id}: {original_score} vs {reproduced_score}")
+            for field in ("result_origin", "receptor_file_hash", "ligand_file_hash"):
+                if original_row.get(field) != reproduced_row.get(field):
+                    match = 0
+                    diff_reasons.append(
+                        f"Docking {field} mismatch for {molecule_id}: {original_row.get(field)!r} vs {reproduced_row.get(field)!r}"
+                    )
+
+        original_metrics = orig_exp.get("metrics", {})
+        reproduced_metrics = new_exp.get("metrics", {})
+        for field in ("reproducibility_hash", "result_origin"):
+            if original_metrics.get(field) != reproduced_metrics.get(field):
+                match = 0
+                diff_reasons.append(
+                    f"Docking {field} mismatch: {original_metrics.get(field)!r} vs {reproduced_metrics.get(field)!r}"
+                )
+        if params.get("result_origin") == "COMPUTED":
+            for field in ("worker_id", "exit_code", "vina_binary_sha256"):
+                if original_metrics.get(field) != reproduced_metrics.get(field):
+                    match = 0
+                    diff_reasons.append(
+                        f"Native attestation {field} mismatch: {original_metrics.get(field)!r} vs {reproduced_metrics.get(field)!r}"
+                    )
 
     with get_db() as conn:
         conn.execute(
@@ -1560,6 +1830,7 @@ def generate_experiment_manifest(experiment_id: str) -> dict:
             "stage": exp["stage"],
             "status": exp["status"],
             "is_immutable_locked": bool(exp["is_locked"]),
+            "lock_scope": "Scientific experiment fields are protected by a database trigger after locking; notes and reproduction linkage remain appendable.",
             "started_at": exp["started_at"],
             "completed_at": exp["completed_at"],
             "duration_seconds": exp["duration_seconds"],
@@ -1687,7 +1958,7 @@ def generate_project_reproducibility_bundle(project_id: str) -> bytes:
             cand_writer.writerow([
                 c["rank_position"], c["molecule_id"], c["molecule_name"],
                 c["composite_score"], c.get("docking_score", ""), c.get("admet_risk_level", ""),
-                c["molecular_weight"], c["logp"], c["tpsa"], c["tier"], c.get("result_origin", "COMPUTED")
+                c["molecular_weight"], c["logp"], c["tpsa"], c["tier"], c.get("result_origin") or "UNKNOWN"
             ])
         cand_bytes = cand_csv.getvalue().encode('utf-8')
         zf.writestr("candidates/ranked_candidates.csv", cand_bytes)
@@ -1928,7 +2199,7 @@ def get_molecule_detail(molecule_id: str) -> Optional[dict]:
                 "experiment_id": cs.get("experiment_id"),
                 "dataset_version": "v4_candidates",
                 "tool": "AIDD Multi-Objective Optimizer",
-                "origin": cs.get("result_origin", "COMPUTED"),
+                "origin": cs.get("result_origin") or "UNKNOWN",
                 "status": "completed",
                 "details": f"Composite Score: {cs['composite_score']:.1f}/100 | Formula: {cs.get('formula_expression', 'Composite Scoring')}"
             })
@@ -2268,7 +2539,7 @@ def seed_demo_project() -> dict:
             """
             INSERT INTO projects (id, name, description, disease_indication, target_protein, hypothesis, current_stage, created_at, updated_at)
             VALUES (?, 'EGFR Inhibitor Discovery',
-                    'Structure-based virtual screening and ADMET profiling of 4th-generation ATP-competitive and allosteric EGFR tyrosine kinase inhibitors for NSCLC with T790M/C797S resistance mutations.',
+                    'Synthetic demonstration workspace for exercising dataset, docking, ADMET, ranking, and provenance plumbing. Values are DEMO data and are not scientific validation.',
                     'Non-Small Cell Lung Cancer (NSCLC)',
                     'Epidermal Growth Factor Receptor (EGFR) Kinase Domain (PDB: 1M17 / 4WKQ)',
                     'Targeting both the ATP catalytic cleft and the adjacent hydrophobic allosteric pocket with an acrylamide or optimized aminoquinazoline scaffold yields sub-nanomolar affinity while circumventing T790M/C797S gatekeeper resistance.',
@@ -2284,25 +2555,26 @@ def seed_demo_project() -> dict:
         conn.execute(
             """
             INSERT INTO datasets (id, project_id, name, version, version_label, parent_dataset_id, experiment_id, description, stage, molecule_count, sha256_hash, created_at)
-            VALUES (?, ?, 'EGFR Raw Candidate Library v1', 1, 'EGFR_dataset_v1', NULL, NULL, 'Initial screening library containing 17 chemical structures.', 'Dataset', 17, 'sha256_ds_v1_egfr', ?)
+            VALUES (?, ?, 'EGFR Raw Candidate Library v1', 1, 'EGFR_dataset_v1', NULL, NULL, 'Bundled synthetic demo library; valid molecule count is assigned after parsing.', 'Dataset', 0, 'sha256_ds_v1_egfr', ?)
             """,
             (ds1_id, proj_id, ts1)
         )
         conn.execute(
             """
             INSERT INTO datasets (id, project_id, name, version, version_label, parent_dataset_id, experiment_id, description, stage, molecule_count, sha256_hash, created_at)
-            VALUES (?, ?, 'Standardized & Lipinski Filtered v2', 2, 'EGFR_dataset_v2', ?, NULL, 'Standardized, desalted, and filtered for drug-likeness (MW <= 650 Da, Ro5 <= 1). 15 compounds retained.', 'Preprocessing', 15, 'sha256_ds_v2_egfr', ?)
+            VALUES (?, ?, 'Standardized & Lipinski Filtered v2', 2, 'EGFR_dataset_v2', ?, NULL, 'Synthetic demo subset retained after parsing/filtering.', 'Preprocessing', 0, 'sha256_ds_v2_egfr', ?)
             """,
             (ds2_id, proj_id, ds1_id, ts2)
         )
         conn.execute(
             """
             INSERT INTO datasets (id, project_id, name, version, version_label, parent_dataset_id, experiment_id, description, stage, molecule_count, sha256_hash, created_at)
-            VALUES (?, ?, 'Docking Enriched Set v3', 3, 'EGFR_dataset_v3', ?, NULL, 'Docking screen completed against EGFR kinase ATP binding pocket (PDB: 4WKQ).', 'Docking', 15, 'sha256_ds_v3_egfr', ?)
+            VALUES (?, ?, 'Docking Enriched Set v3', 3, 'EGFR_dataset_v3', ?, NULL, 'Synthetic DEMO docking scores attached for interface and provenance testing.', 'Docking', 0, 'sha256_ds_v3_egfr', ?)
             """,
             (ds3_id, proj_id, ds2_id, ts3)
         )
 
+        seeded_compounds = []
         for c in compounds:
             d = ScientificEngine.calculate_descriptors(c["smiles"])
             if d["valid"]:
@@ -2324,8 +2596,17 @@ def seed_demo_project() -> dict:
                     )
                 )
                 conn.execute("INSERT INTO dataset_molecules (dataset_id, molecule_id, included_at) VALUES (?, ?, ?)", (ds1_id, c["id"], ts1))
+                seeded_compounds.append(c)
 
-        for c in compounds[:15]:
+        retained_compounds = [c for c in seeded_compounds if c["id"] in docking_benchmark]
+        conn.execute(
+            "UPDATE datasets SET molecule_count = ?, description = ? WHERE id = ?",
+            (len(seeded_compounds), f"Bundled synthetic demo library containing {len(seeded_compounds)} successfully parsed structures.", ds1_id)
+        )
+        for dataset_id in (ds2_id, ds3_id):
+            conn.execute("UPDATE datasets SET molecule_count = ? WHERE id = ?", (len(retained_compounds), dataset_id))
+
+        for c in retained_compounds:
             conn.execute("INSERT INTO dataset_molecules (dataset_id, molecule_id, included_at) VALUES (?, ?, ?)", (ds2_id, c["id"], ts2))
             conn.execute("INSERT INTO dataset_molecules (dataset_id, molecule_id, included_at) VALUES (?, ?, ?)", (ds3_id, c["id"], ts3))
 
@@ -2339,15 +2620,15 @@ def seed_demo_project() -> dict:
             """
             INSERT INTO experiments
             (id, project_id, name, experiment_type, status, stage, input_dataset_id, output_dataset_id, tool, tool_version, started_at, completed_at, duration_seconds, molecules_in, molecules_out, molecules_failed, is_locked, reproduction_of_id, reproduction_match, environment_info, parameters, metrics, logs, warnings, notes, notes_log, reproducibility_manifest, created_at)
-            VALUES (?, ?, 'Molecule Library Ingestion', 'molecule_import', 'completed', 'Dataset', NULL, ?, 'AIDD Chemical Parser Service', '1.2.0', ?, ?, 0.42, 17, 16, 1, 1, NULL, NULL, ?, ?, ?, ?, ?, 'Initial import of EGFR inhibitor library from ChEMBL and clinical trial databases.', '[]', '', ?)
+            VALUES (?, ?, 'Molecule Library Ingestion', 'molecule_import', 'completed', 'Dataset', NULL, ?, 'AIDD Demo Chemical Parser', 'demo-fixture-v1', ?, ?, 0.42, ?, ?, ?, 1, NULL, NULL, ?, ?, ?, ?, ?, 'Bundled synthetic demo data.', '[]', '', ?)
             """,
             (
-                exp1_id, proj_id, ds1_id, ts1, ts1,
+                exp1_id, proj_id, ds1_id, ts1, ts1, len(compounds), len(seeded_compounds), len(compounds) - len(seeded_compounds),
                 json.dumps(get_system_environment_info()),
-                json.dumps({"source": "ChEMBL_EGFR_Kinase_Core", "sanitization": True, "generate_2d_structures": True, "result_origin": "DEMO"}),
-                json.dumps({"total_imported": 17, "valid_parsed": 16, "failed": 1}),
-                f"[{ts1}] [INFO] Starting library import for EGFR Inhibitor Discovery\n[{ts1}] [INFO] Generated 2D vector coordinates\n[{ts1}] [WARNING] 1 molecule failed chemical valence validation",
-                "1 compound had invalid chemical valence state (LIG-FAIL-01)",
+                json.dumps({"source": "BundledSyntheticDemoLibrary", "sanitization": True, "generate_2d_structures": True, "result_origin": "DEMO"}),
+                json.dumps({"total_imported": len(compounds), "valid_parsed": len(seeded_compounds), "failed": len(compounds) - len(seeded_compounds)}),
+                f"[{ts1}] [INFO] Parsing bundled synthetic demo library\n[{ts1}] [INFO] Generated 2D display coordinates\n[{ts1}] [WARNING] {len(compounds) - len(seeded_compounds)} structures failed parsing",
+                f"{len(compounds) - len(seeded_compounds)} bundled demo structures failed parsing",
                 ts1
             )
         )
@@ -2356,15 +2637,15 @@ def seed_demo_project() -> dict:
             """
             INSERT INTO experiments
             (id, project_id, name, experiment_type, status, stage, input_dataset_id, output_dataset_id, tool, tool_version, started_at, completed_at, duration_seconds, molecules_in, molecules_out, molecules_failed, is_locked, reproduction_of_id, reproduction_match, environment_info, parameters, metrics, logs, warnings, notes, notes_log, reproducibility_manifest, created_at)
-            VALUES (?, ?, 'Standardization & MW Cutoff Filter', 'preprocessing', 'completed', 'Preprocessing', ?, ?, 'AIDD Standardization Kernel', '1.2.0', ?, ?, 0.85, 16, 15, 1, 1, NULL, NULL, ?, ?, ?, ?, ?, 'Filtered out high MW macrolide polymer compound to ensure oral bioavailability compliance.', '[]', '', ?)
+            VALUES (?, ?, 'Standardization & MW Cutoff Filter', 'preprocessing', 'completed', 'Preprocessing', ?, ?, 'AIDD Demo Standardization Fixture', 'demo-fixture-v1', ?, ?, 0.85, ?, ?, ?, 1, NULL, NULL, ?, ?, ?, ?, ?, 'Synthetic demo filtering step.', '[]', '', ?)
             """,
             (
-                exp2_id, proj_id, ds1_id, ds2_id, ts2, ts2,
+                exp2_id, proj_id, ds1_id, ds2_id, ts2, ts2, len(seeded_compounds), len(retained_compounds), len(seeded_compounds) - len(retained_compounds),
                 json.dumps(get_system_environment_info()),
                 json.dumps({"desalting": "LargestOrganicFragment", "neutralize_charges": True, "max_mw": 650.0, "max_logp": 6.8, "max_ro5_violations": 1, "result_origin": "DEMO"}),
-                json.dumps({"retention_rate": "93.8%", "molecules_in": 16, "molecules_out": 15, "molecules_filtered": 1}),
-                f"[{ts2}] [INFO] Loaded dataset EGFR_dataset_v1\n[{ts2}] [INFO] Neutralized zwitterionic centers\n[{ts2}] [INFO] Excluded LIG-FAIL-02 (MW > 800 Da)\n[{ts2}] [INFO] Emitted immutable dataset snapshot EGFR_dataset_v2",
-                "Excluded 1 high molecular weight compound",
+                json.dumps({"molecules_in": len(seeded_compounds), "molecules_out": len(retained_compounds), "molecules_filtered": len(seeded_compounds) - len(retained_compounds), "result_origin": "DEMO"}),
+                f"[{ts2}] [INFO] Applied synthetic demo subset rules\n[{ts2}] [INFO] Emitted dataset snapshot EGFR_dataset_v2 [Origin: DEMO]",
+                f"Excluded {len(seeded_compounds) - len(retained_compounds)} demo structures",
                 ts2
             )
         )
@@ -2373,14 +2654,14 @@ def seed_demo_project() -> dict:
             """
             INSERT INTO experiments
             (id, project_id, name, experiment_type, status, stage, input_dataset_id, output_dataset_id, tool, tool_version, started_at, completed_at, duration_seconds, molecules_in, molecules_out, molecules_failed, is_locked, reproduction_of_id, reproduction_match, environment_info, parameters, metrics, logs, warnings, notes, notes_log, reproducibility_manifest, created_at)
-            VALUES (?, ?, 'AutoDock Vina Kinase Pocket Docking', 'docking', 'completed', 'Docking', ?, ?, 'AutoDock Vina', '1.2.5', ?, ?, 12.4, 15, 15, 0, 1, NULL, NULL, ?, ?, ?, ?, '', 'Targeted ATP hinge region and hydrophobic sub-pocket II of EGFR kinase domain (PDB: 4WKQ).', '[]', '', ?)
+            VALUES (?, ?, 'Synthetic Docking Demo', 'docking', 'completed', 'Docking', ?, ?, 'AIDD Docking Demo Fixture', 'demo-fixture-v1', ?, ?, 12.4, ?, ?, 0, 1, NULL, NULL, ?, ?, ?, ?, '', 'Synthetic scores for interface and provenance testing only.', '[]', '', ?)
             """,
             (
-                exp3_id, proj_id, ds2_id, ds3_id, ts3, ts3,
+                exp3_id, proj_id, ds2_id, ds3_id, ts3, ts3, len(retained_compounds), len(retained_compounds),
                 json.dumps(get_system_environment_info()),
-                json.dumps({"receptor": "4WKQ_EGFR_monomer.pdbqt", "center": [22.4, 0.8, 52.5], "box_size": [20.0, 20.0, 20.0], "exhaustiveness": 16, "num_modes": 9, "result_origin": "IMPORTED"}),
-                json.dumps({"molecules_docked": 15, "best_score_kcal_mol": -10.4, "mean_score_kcal_mol": -9.31, "compounds_below_neg_9": 10}),
-                f"[{ts3}] [INFO] Loaded receptor 4WKQ grid parameters\n[{ts3}] [INFO] Running genetic algorithm search (exhaustiveness=16)\n[{ts3}] [INFO] Docking completed for 15 ligands [Origin: IMPORTED]\n[{ts3}] [INFO] Top binder: Lapatinib (-10.4 kcal/mol), Osimertinib (-9.8 kcal/mol)",
+                json.dumps({"fixture": "synthetic-receptor-shaped-demo", "center": [22.4, 0.8, 52.5], "box_size": [20.0, 20.0, 20.0], "result_origin": "DEMO"}),
+                json.dumps({"molecules_with_demo_scores": len(retained_compounds), "result_origin": "DEMO"}),
+                f"[{ts3}] [INFO] Attached synthetic docking demo scores to {len(retained_compounds)} structures [Origin: DEMO]",
                 ts3
             )
         )
@@ -2389,14 +2670,14 @@ def seed_demo_project() -> dict:
             """
             INSERT INTO experiments
             (id, project_id, name, experiment_type, status, stage, input_dataset_id, output_dataset_id, tool, tool_version, started_at, completed_at, duration_seconds, molecules_in, molecules_out, molecules_failed, is_locked, reproduction_of_id, reproduction_match, environment_info, parameters, metrics, logs, warnings, notes, notes_log, reproducibility_manifest, created_at)
-            VALUES (?, ?, 'SwissADME & pkCSM Profiling', 'admet', 'completed', 'ADMET', ?, NULL, 'SwissADME & pkCSM Engine', '2024.1', ?, ?, 1.2, 15, 15, 0, 1, NULL, NULL, ?, ?, ?, ?, '', 'Evaluated gastrointestinal absorption, BBB permeability, and hepatotoxicity flags.', '[]', '', ?)
+            VALUES (?, ?, 'Synthetic ADMET Demo', 'admet', 'completed', 'ADMET', ?, NULL, 'AIDD ADMET Demo Fixture', 'demo-fixture-v1', ?, ?, 1.2, ?, ?, 0, 1, NULL, NULL, ?, ?, ?, ?, '', 'Synthetic endpoint categories for interface and provenance testing only.', '[]', '', ?)
             """,
             (
-                exp4_id, proj_id, ds3_id, ts4, ts4,
+                exp4_id, proj_id, ds3_id, ts4, ts4, len(retained_compounds), len(retained_compounds),
                 json.dumps(get_system_environment_info()),
-                json.dumps({"models": ["BOILED-Egg", "CYP450 3A4/2D6", "hERG Cardiotoxicity", "Ames Mutagenicity", "pkCSM Clearance"], "result_origin": "IMPORTED"}),
-                json.dumps({"evaluated_molecules": 15, "low_risk_count": 14, "moderate_risk_count": 1}),
-                f"[{ts4}] [INFO] Evaluated pharmacokinetic parameters for 15 compounds [Origin: IMPORTED]\n[{ts4}] [INFO] GI absorption: 100% High\n[{ts4}] [INFO] Ames test: 0 positive mutagenic alerts\n[{ts4}] [INFO] Identified 1 moderate risk compound (Lapatinib due to lipophilicity)",
+                json.dumps({"fixture": "synthetic-admet-categories", "result_origin": "DEMO"}),
+                json.dumps({"evaluated_molecules": len(retained_compounds), "result_origin": "DEMO"}),
+                f"[{ts4}] [INFO] Attached synthetic ADMET demo categories to {len(retained_compounds)} structures [Origin: DEMO]",
                 ts4
             )
         )
@@ -2409,14 +2690,14 @@ def seed_demo_project() -> dict:
             """
             INSERT INTO experiments
             (id, project_id, name, experiment_type, status, stage, input_dataset_id, output_dataset_id, tool, tool_version, started_at, completed_at, duration_seconds, molecules_in, molecules_out, molecules_failed, is_locked, reproduction_of_id, reproduction_match, environment_info, parameters, metrics, logs, warnings, notes, notes_log, reproducibility_manifest, created_at)
-            VALUES (?, ?, 'Lead Candidate Multi-Parameter Ranking', 'candidate_ranking', 'completed', 'Candidate Selection', ?, NULL, 'AIDD Multi-Objective Optimizer', '1.2.0', ?, ?, 0.35, 15, 15, 0, 1, NULL, NULL, ?, ?, ?, ?, '', 'Transparent composite scoring applied with 35% Docking, 25% QSAR, 25% ADMET, 15% QED.', '[]', '', ?)
+            VALUES (?, ?, 'Lead Candidate Multi-Parameter Ranking', 'candidate_ranking', 'completed', 'Candidate Selection', ?, NULL, 'AIDD Demo Multi-Objective Optimizer', 'demo-fixture-v1', ?, ?, 0.35, ?, ?, 0, 1, NULL, NULL, ?, ?, ?, ?, '', 'Composite ranking derived from synthetic DEMO inputs.', '[]', '', ?)
             """,
             (
-                exp5_id, proj_id, ds3_id, ts5, ts5,
+                exp5_id, proj_id, ds3_id, ts5, ts5, len(retained_compounds), len(retained_compounds),
                 json.dumps(get_system_environment_info()),
-                json.dumps({"weights": weights, "formula": formula_str, "lead_threshold": 84.0, "result_origin": "COMPUTED"}),
-                json.dumps({"lead_candidates_count": 5, "backup_leads_count": 5, "top_candidate": "LIG-001 (Osimertinib)"}),
-                f"[{ts5}] [INFO] Computed composite desirability scores for 15 compounds [Origin: COMPUTED]\n[{ts5}] [INFO] Classified 5 Lead Candidates (Osimertinib, Lapatinib, Brigatinib, Mobocertinib, Gefitinib)\n[{ts5}] [INFO] Classified 5 Backup Leads",
+                json.dumps({"weights": weights, "formula": formula_str, "lead_threshold": 84.0, "result_origin": "DEMO"}),
+                json.dumps({"ranked_demo_records": len(retained_compounds), "result_origin": "DEMO"}),
+                f"[{ts5}] [INFO] Ranked {len(retained_compounds)} synthetic demo records [Origin: DEMO]",
                 ts5
             )
         )
@@ -2440,17 +2721,17 @@ def seed_demo_project() -> dict:
             (exp2_id, ts2)
         )
 
-        for c in compounds[:15]:
+        for c in retained_compounds:
             score = docking_benchmark.get(c["id"], -9.0)
             conn.execute(
                 """
                 INSERT INTO docking_results (id, project_id, molecule_id, experiment_id, docking_score, result_origin, receptor, docking_tool, pose_identifier, binding_site_coords, center_x, center_y, center_z, size_x, size_y, size_z, exhaustiveness, seed, vina_version, receptor_file_hash, ligand_file_hash, rmsd_lower_bound, rmsd_upper_bound, created_at)
-                VALUES (?, ?, ?, ?, ?, 'IMPORTED', 'EGFR Kinase Domain (PDB: 4WKQ / C797S Mut)', 'AutoDock Vina', 'pose_1.pdbqt', 'center_x=22.4, y=0.8, z=52.5; box=20x20x20', 22.4, 0.8, 52.5, 20.0, 20.0, 20.0, 16, 42, '1.2.5', 'sha256_4wkq_rec', ?, 0.0, 1.35, ?)
+                VALUES (?, ?, ?, ?, ?, 'DEMO', 'Synthetic receptor fixture', 'AIDD Docking Demo Fixture', NULL, 'synthetic fixture box', 22.4, 0.8, 52.5, 20.0, 20.0, 20.0, 16, 42, 'demo-fixture-v1', 'synthetic_fixture_hash', ?, NULL, NULL, ?)
                 """,
                 (gen_id("dock"), proj_id, c["id"], exp3_id, score, compute_sha256(c["smiles"]), ts3)
             )
 
-        for c in compounds[:15]:
+        for c in retained_compounds:
             mid = c["id"]
             if mid == "LIG-001": gi, bbb, cyp, hep, ames, herg, clr, bio, risk = "High", "Yes", "Yes", "Low Risk", "Negative", "Low Risk", 4.2, 0.55, "Low Risk"
             elif mid == "LIG-004": gi, bbb, cyp, hep, ames, herg, clr, bio, risk = "High", "No", "Yes", "Moderate Risk", "Negative", "Low Risk", 3.1, 0.55, "Moderate Risk"
@@ -2460,7 +2741,7 @@ def seed_demo_project() -> dict:
                 """
                 INSERT INTO admet_results
                 (id, project_id, molecule_id, experiment_id, result_origin, provider_tool, model_version, endpoint_name, confidence_score, units, source_file_hash, gi_absorption, bbb_permeant, cyp3a4_inhibitor, cyp2d6_inhibitor, hepatotoxicity, mutagenicity_ames, herg_inhibition, clearance_rate, bioavailability_score, admet_risk_level, risk_details, disclaimer, created_at)
-                VALUES (?, ?, ?, ?, 'IMPORTED', 'SwissADME Consensus', '2024.1', 'ConsensusADMET', 0.90, 'categorical/mL/min/kg', 'sha256_swissadme_ref', ?, ?, ?, 'No', ?, ?, ?, ?, ?, ?, ?, 'Computational prediction. In vitro verification required.', ?)
+                VALUES (?, ?, ?, ?, 'DEMO', 'AIDD ADMET Demo Fixture', 'demo-fixture-v1', 'DemoADMET', 0.0, 'categorical/mL/min/kg', 'synthetic_fixture_hash', ?, ?, ?, 'No', ?, ?, ?, ?, ?, ?, ?, 'Synthetic demo values; not scientific predictions.', ?)
                 """,
                 (
                     gen_id("admet"), proj_id, mid, exp4_id,
@@ -2488,14 +2769,17 @@ def seed_demo_project() -> dict:
             ("LIG-014", 68.0, 15, "Follow-up")
         ]
 
+        retained_ids = {c["id"] for c in retained_compounds}
         for mid, score, rank, tier in candidate_tiers:
+            if mid not in retained_ids:
+                continue
             raw_c = {"docking_raw_kcal_mol": docking_benchmark.get(mid, -9.0), "admet_raw": "Low Risk"}
             weighted_c = {"docking_contrib": 32.0, "qsar_contrib": 24.0, "admet_contrib": 24.0, "qed_contrib": 11.4}
             conn.execute(
                 """
                 INSERT INTO candidate_scores
                 (id, project_id, molecule_id, experiment_id, composite_score, result_origin, docking_component, qsar_component, admet_component, druglikeness_component, weights_applied, formula_expression, normalization_method, raw_components_json, weighted_components_json, missing_data_policy, is_data_complete, rank_position, tier, selection_notes, updated_at)
-                VALUES (?, ?, ?, ?, ?, 'COMPUTED', 92.0, 88.0, 95.0, 75.0, ?, ?, ?, ?, ?, 'RENORMALIZE', 1, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, 'DEMO', 92.0, 88.0, 95.0, 75.0, ?, ?, ?, ?, ?, 'RENORMALIZE', 1, ?, ?, ?, ?)
                 """,
                 (
                     gen_id("cand"), proj_id, mid, exp5_id, score,
