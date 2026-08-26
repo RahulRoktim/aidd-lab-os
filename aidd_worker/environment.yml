@@ -4,10 +4,10 @@ channels:
   - bioconda
   - defaults
 dependencies:
-  - python=3.11.8
-  - rdkit=2023.09.5
-  - vina=1.2.5
-  - openbabel=3.1.1
+  - python=3.11.8=hab00c5b_0_cpython
+  - rdkit=2023.09.5=py311h4c2f14b_0
+  - vina=1.2.5=py311hfdbb021_5
+  - openbabel=3.1.1=py311h8b422cb_9
   - numpy=1.26.4
   - scipy=1.12.0
   - pandas=2.2.1

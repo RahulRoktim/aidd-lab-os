@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-AIDD Lab OS — Native Scientific Validation Harness (v1.4.0)
-One-command native runtime verification orchestrator.
-Validates RDKit C++ kernel, AutoDock Vina binary, Job Queue, App ↔ Worker integration,
+AIDD Lab OS — Native Runtime Attestation Harness (v1.4.0)
+One-command supported-runtime verification orchestrator.
+Checks RDKit compiled execution, the release-trusted AutoDock Vina binary, Job Queue, App ↔ Worker integration,
 reproducibility manifests, and generates machine-readable JSON & HTML audit reports.
 """
 
@@ -68,6 +68,52 @@ def http_post(url: str, data: dict, timeout: float = 60.0) -> Tuple[bool, Any]:
             return False, str(e)
     except Exception as e:
         return False, str(e)
+
+
+def validate_provenance_dag(graph: dict, expected_edges: List[Tuple[str, str]]) -> dict:
+    node_ids = [node.get("id") for node in graph.get("nodes", []) if node.get("id")]
+    node_set = set(node_ids)
+    edges = [(edge.get("source"), edge.get("target")) for edge in graph.get("edges", [])]
+    dangling = [
+        {"source": source, "target": target}
+        for source, target in edges
+        if source not in node_set or target not in node_set
+    ]
+    edge_set = set(edges)
+    missing_expected = [
+        {"source": source, "target": target}
+        for source, target in expected_edges
+        if (source, target) not in edge_set
+    ]
+
+    adjacency = {node_id: [] for node_id in node_set}
+    indegree = {node_id: 0 for node_id in node_set}
+    for source, target in edges:
+        if source in node_set and target in node_set:
+            adjacency[source].append(target)
+            indegree[target] += 1
+    queue = [node_id for node_id, degree in indegree.items() if degree == 0]
+    visited = 0
+    while queue:
+        node_id = queue.pop()
+        visited += 1
+        for target in adjacency[node_id]:
+            indegree[target] -= 1
+            if indegree[target] == 0:
+                queue.append(target)
+    cycle_detected = visited != len(node_set)
+    duplicate_node_ids = sorted({node_id for node_id in node_ids if node_ids.count(node_id) > 1})
+    valid = bool(node_set and edges and not dangling and not missing_expected and not cycle_detected and not duplicate_node_ids)
+    return {
+        "valid": valid,
+        "node_count": len(node_set),
+        "edge_count": len(edges),
+        "dangling_edges": dangling,
+        "missing_expected_edges": missing_expected,
+        "cycle_detected": cycle_detected,
+        "duplicate_node_ids": duplicate_node_ids,
+        "expected_edges": [{"source": source, "target": target} for source, target in expected_edges],
+    }
 
 # -----------------------------------------------------------------------------
 # VALIDATION ORCHESTRATOR CLASS
@@ -196,26 +242,42 @@ class NativeValidationHarness:
         self.report["worker_readiness"] = r_data
         self.report["environment_fingerprint"] = r_data.get("environment_sha256", "")
 
-        rdk_ready = r_data.get("rdkit_ready", False)
-        vina_ready = r_data.get("vina_ready", False)
+        rdk_ready = bool(
+            r_data.get("rdkit_ready") is True
+            and r_data.get("rdkit_module_origin_verified") is True
+            and r_data.get("rdkit_native_components_verified") is True
+            and r_data.get("rdkit_package_metadata_verified") is True
+            and r_data.get("rdkit_known_answer_verified") is True
+        )
+        vina_ready = bool(
+            r_data.get("vina_ready") is True
+            and r_data.get("vina_identity_verified") is True
+            and r_data.get("vina_binary_digest_verified") is True
+            and r_data.get("vina_path_verified") is True
+            and r_data.get("vina_package_metadata_verified") is True
+            and r_data.get("vina_binary_sha256") == r_data.get("vina_expected_binary_sha256")
+        )
         status_str = r_data.get("status", "UNAVAILABLE")
 
         self.log("WORKER", f"Worker Health: {h_data.get('status')} | Version: v{r_data.get('worker_version')}", "PASS")
         self.log("WORKER", f"Scientific Readiness: {status_str}", "PASS" if status_str == "READY" else ("WARN" if status_str == "DEGRADED" else "INFO"))
-        self.log("WORKER", f"RDKit Engine: {'READY (Native C++)' if rdk_ready else 'FALLBACK (Pure-Python)'}", "PASS" if rdk_ready else "INFO")
-        self.log("WORKER", f"AutoDock Vina: {'READY (Native Binary)' if vina_ready else 'UNAVAILABLE (PATH Lookup Empty)'}", "PASS" if vina_ready else "INFO")
+        self.log("WORKER", f"RDKit Engine: {'READY (compiled components + known answers)' if rdk_ready else 'NOT ATTESTED'}", "PASS" if rdk_ready else "FAIL")
+        self.log("WORKER", f"AutoDock Vina: {'READY (release digest matched)' if vina_ready else 'NOT ATTESTED'}", "PASS" if vina_ready else "FAIL")
         self.log("WORKER", f"Environment Fingerprint: {r_data.get('environment_sha256', '')[:16]}...", "INFO")
 
         return True
 
     # -------------------------------------------------------------------------
-    # STAGE 3: NATIVE RDKIT EXECUTION PROOF (Aspirin)
+    # STAGE 3: NATIVE RDKIT EXECUTION PROOF (Known Answers)
     # -------------------------------------------------------------------------
     def run_native_rdkit_proof(self) -> bool:
-        self.log("RDKIT_PROOF", "Executing single-compound descriptor calculation through worker API...", "INFO")
+        self.log("RDKIT_PROOF", "Executing aspirin and caffeine known-answer calculations through the worker API...", "INFO")
         aspirin_smiles = "CC(=O)OC1=CC=CC=C1C(=O)O"
         payload = {
-            "molecules": [{"id": "ASPIRIN-PROOF", "name": "Aspirin (Acetylsalicylic Acid)", "smiles": aspirin_smiles}],
+            "molecules": [
+                {"id": "ASPIRIN-PROOF", "name": "Aspirin", "smiles": aspirin_smiles},
+                {"id": "CAFFEINE-PROOF", "name": "Caffeine", "smiles": "CN1C=NC2=C1C(=O)N(C(=O)N2C)C"},
+            ],
             "experiment_id": "exp_rdkit_proof_val",
             "execution_mode": "NATIVE"
         }
@@ -231,40 +293,87 @@ class NativeValidationHarness:
             self.log("RDKIT_PROOF", "No results returned in descriptor job", "FAIL")
             return False
 
-        m = results[0]
-        engine = m.get("engine", "")
-        origin = m.get("result_origin", "")
-        prod_ready = m.get("production_ready", False)
+        by_id = {result.get("id"): result for result in results}
+        expected = {
+            "ASPIRIN-PROOF": {"formula": "C9H8O4", "mw": 180.159, "hbd": 1, "hba": 3, "logp": 1.3101},
+            "CAFFEINE-PROOF": {"formula": "C8H10N4O2", "mw": 194.194, "hbd": 0, "hba": 6, "logp": -1.0293},
+        }
+        known_answer_results = []
+        known_answers_passed = True
+        for molecule_id, reference in expected.items():
+            actual = by_id.get(molecule_id, {})
+            checks = {
+                "formula": actual.get("formula") == reference["formula"],
+                "molecular_weight": isinstance(actual.get("molecular_weight"), (int, float)) and abs(float(actual["molecular_weight"]) - reference["mw"]) <= 0.02,
+                "hbd": actual.get("hbd") == reference["hbd"],
+                "hba": actual.get("hba") == reference["hba"],
+                "logp": isinstance(actual.get("logp"), (int, float)) and abs(float(actual["logp"]) - reference["logp"]) <= 0.03,
+                "origin": actual.get("result_origin") == "COMPUTED",
+                "production_ready": actual.get("production_ready") is True,
+            }
+            passed = all(checks.values())
+            known_answers_passed = known_answers_passed and passed
+            known_answer_results.append({
+                "molecule_id": molecule_id,
+                "passed": passed,
+                "actual": {key: actual.get(key) for key in ("formula", "molecular_weight", "hbd", "hba", "logp", "engine", "result_origin")},
+                "expected": reference,
+                "checks": checks,
+                "hba_api": "rdkit.Chem.Lipinski.NumHAcceptors",
+            })
+
+        aspirin = by_id.get("ASPIRIN-PROOF", {})
+        engine = aspirin.get("engine", "")
+        readiness = self.report.get("worker_readiness", {})
+        readiness_attested = bool(
+            readiness.get("rdkit_ready") is True
+            and readiness.get("rdkit_module_origin_verified") is True
+            and readiness.get("rdkit_native_components_verified") is True
+            and readiness.get("rdkit_package_metadata_verified") is True
+            and readiness.get("rdkit_known_answer_verified") is True
+        )
 
         proof_data = {
             "job_id": res.get("job_id"),
             "status": res.get("status"),
             "successful_count": res.get("successful_count", len(results)),
             "failed_count": res.get("failed_count", len(res.get("failures", []))),
-            "molecule_id": m.get("id"),
-            "smiles": m.get("smiles"),
-            "canonical_smiles": m.get("canonical_smiles"),
-            "formula": m.get("formula"),
-            "molecular_weight": m.get("molecular_weight"),
-            "exact_molecular_weight": m.get("exact_molecular_weight"),
-            "logp": m.get("logp"),
-            "tpsa": m.get("tpsa"),
-            "hbd": m.get("hbd"),
-            "hba": m.get("hba"),
-            "rotatable_bonds": m.get("rotatable_bonds"),
-            "qed": m.get("qed"),
+            "molecule_id": aspirin.get("id"),
+            "smiles": aspirin.get("smiles"),
+            "canonical_smiles": aspirin.get("canonical_smiles"),
+            "formula": aspirin.get("formula"),
+            "molecular_weight": aspirin.get("molecular_weight"),
+            "exact_molecular_weight": aspirin.get("exact_molecular_weight"),
+            "logp": aspirin.get("logp"),
+            "tpsa": aspirin.get("tpsa"),
+            "hbd": aspirin.get("hbd"),
+            "hba": aspirin.get("hba"),
+            "rotatable_bonds": aspirin.get("rotatable_bonds"),
+            "qed": aspirin.get("qed"),
             "engine": engine,
-            "production_ready": prod_ready,
-            "result_origin": origin,
-            "is_native_rdkit": "RDKit" in engine and prod_ready
+            "production_ready": aspirin.get("production_ready", False),
+            "result_origin": aspirin.get("result_origin"),
+            "module_path": readiness.get("rdkit_module_path"),
+            "native_components_verified": readiness.get("rdkit_native_components_verified", False),
+            "package_metadata_verified": readiness.get("rdkit_package_metadata_verified", False),
+            "known_answer_verified": known_answers_passed and readiness.get("rdkit_known_answer_verified") is True,
+            "known_answer_results": known_answer_results,
+            "is_native_rdkit": bool(
+                res.get("status") == "COMPLETED"
+                and res.get("failed_count", len(res.get("failures", []))) == 0
+                and len(results) == 2
+                and "RDKit" in engine
+                and readiness_attested
+                and known_answers_passed
+            ),
         }
         self.report["rdkit_proof"] = proof_data
 
         if proof_data["is_native_rdkit"]:
-            self.log("RDKIT_PROOF", f"Native RDKit executed successfully. Formula: {m.get('formula')}, MW: {m.get('molecular_weight')} Da, LogP: {m.get('logp')}, Origin: {origin}", "PASS")
+            self.log("RDKIT_PROOF", f"Known answers passed: aspirin MW={aspirin.get('molecular_weight')}, HBA={aspirin.get('hba')}; caffeine HBA={by_id['CAFFEINE-PROOF'].get('hba')}", "PASS")
             return True
         else:
-            self.log("RDKIT_PROOF", f"Native proof rejected: engine='{engine}', production_ready={prod_ready}, origin={origin}", "FAIL")
+            self.log("RDKIT_PROOF", f"Native proof rejected: engine='{engine}', readiness_attested={readiness_attested}, known_answers={known_answers_passed}", "FAIL")
             return False
 
     # -------------------------------------------------------------------------
@@ -284,10 +393,15 @@ class NativeValidationHarness:
         failed = res.get("failed_count", 0)
         cats = res.get("categories_tested", 0)
         engine = res.get("engine", "")
+        attestation = res.get("rdkit_attestation", {})
 
         native_suite = bool(
             failed == 0
             and res.get("production_ready") is True
+            and attestation.get("module_origin_verified") is True
+            and attestation.get("native_components_verified") is True
+            and attestation.get("package_metadata_verified") is True
+            and attestation.get("known_answer_verified") is True
             and all(sample.get("result_origin") == "COMPUTED" for sample in res.get("sample_results", []))
         )
         self.log("RDKIT_SUITE", f"Processed {passed}/{total} diverse chemical structures across {cats} categories ({engine})", "PASS" if native_suite else "FAIL")
@@ -300,7 +414,7 @@ class NativeValidationHarness:
         self.log("VINA_PROOF", "Executing native AutoDock Vina subprocess smoke test with synthetic plumbing fixtures...", "INFO")
         
         rec_path = os.path.join(BASE_DIR, "benchmark_assets", "synthetic_4wkq_receptor_fixture.pdbqt")
-        lig_path = os.path.join(BASE_DIR, "benchmark_assets", "synthetic_erlotinib_ligand_fixture.pdbqt")
+        lig_path = os.path.join(BASE_DIR, "benchmark_assets", "synthetic_ligand_fixture_b.pdbqt")
 
         if not os.path.exists(rec_path) or not os.path.exists(lig_path):
             self.log("VINA_PROOF", "Synthetic PDBQT plumbing fixtures are missing from benchmark_assets/", "FAIL")
@@ -358,9 +472,17 @@ class NativeValidationHarness:
             and isinstance(tool_version, str)
             and tool_version.lower().startswith("autodock vina")
             and readiness.get("vina_identity_verified") is True
+            and readiness.get("vina_binary_digest_verified") is True
+            and readiness.get("vina_path_verified") is True
+            and readiness.get("vina_package_metadata_verified") is True
+            and readiness.get("vina_binary_sha256") == readiness.get("vina_expected_binary_sha256")
             and metrics.get("vina_identity_verified") is True
             and metrics.get("vina_binary_sha256")
             and metrics.get("vina_binary_sha256") == readiness.get("vina_binary_sha256")
+            and metrics.get("vina_expected_binary_sha256") == readiness.get("vina_expected_binary_sha256")
+            and metrics.get("vina_binary_digest_verified") is True
+            and metrics.get("vina_path_verified") is True
+            and metrics.get("vina_package_metadata_verified") is True
             and len(results) > 0
             and not failures
             and len(output_artifacts) == len(results)
@@ -369,6 +491,14 @@ class NativeValidationHarness:
                 and result.get("tool") == "AutoDock Vina"
                 and result.get("tool_version") == tool_version
                 and result.get("vina_binary_sha256") == metrics.get("vina_binary_sha256")
+                and result.get("vina_expected_binary_sha256") == metrics.get("vina_expected_binary_sha256")
+                and result.get("vina_binary_digest_verified") is True
+                and result.get("vina_path_verified") is True
+                and result.get("vina_package_metadata_verified") is True
+                and result.get("output_created_after_start") is True
+                and result.get("output_path_verified") is True
+                and result.get("ligand_output_integrity", {}).get("verified") is True
+                and result.get("prepared_ligand_id") == result.get("molecule_id")
                 and result.get("output_pdbqt_hash") in {artifact["sha256_hash"] for artifact in output_artifacts}
                 and result.get("receptor_hash")
                 and result.get("ligand_hash")
@@ -394,8 +524,15 @@ class NativeValidationHarness:
             "stderr_captured": bool(res.get("stderr")),
             "stdout_sha256": metrics.get("stdout_sha256"),
             "vina_binary_sha256": metrics.get("vina_binary_sha256"),
+            "vina_expected_binary_sha256": metrics.get("vina_expected_binary_sha256"),
+            "vina_binary_digest_verified": metrics.get("vina_binary_digest_verified", False),
+            "vina_path": metrics.get("vina_path"),
+            "vina_expected_path": metrics.get("vina_expected_path"),
+            "vina_path_verified": metrics.get("vina_path_verified", False),
+            "vina_package_metadata_verified": metrics.get("vina_package_metadata_verified", False),
             "vina_version_output_sha256": metrics.get("vina_version_output_sha256"),
             "output_pdbqt_hashes": metrics.get("output_pdbqt_hashes", []),
+            "prepared_ligand_attestations": metrics.get("prepared_ligand_attestations", []),
             "reproducibility_hash": res.get("reproducibility_hash"),
             "fixture_class": "SYNTHETIC_PLUMBING_FIXTURE",
             "fixture_search_box": payload["search_box"],
@@ -439,9 +576,9 @@ class NativeValidationHarness:
         proj_payload = {
             "name": "AIDD Native Runtime Validation Project",
             "description": "Automated system validation project for verifying scientific execution, relational provenance, and manifests.",
-            "disease_indication": "Validation Target",
-            "target_protein": "EGFR Kinase Active Site (4WKQ)",
-            "hypothesis": "Proving end-to-end relational and computational pipeline integrity."
+            "disease_indication": "Runtime plumbing validation",
+            "target_protein": "Synthetic receptor fixture B",
+            "hypothesis": "Exercise the attested runtime and provenance path without making a scientific binding claim."
         }
         succ, proj = http_post(f"{self.app_url}/api/projects", proj_payload, timeout=10.0)
         if not succ or not proj:
@@ -455,8 +592,7 @@ class NativeValidationHarness:
         # 2. Ingest molecules
         import_payload = {
             "molecules": [
-                {"id": "VAL-01", "name": "Osimertinib", "smiles": "C=CC(=O)Nc1cc(Nc2nccc(n2)c3cn(C)c4ccccc34)c(OC)cc1N(C)CCN(C)C"},
-                {"id": "VAL-02", "name": "Gefitinib", "smiles": "COc1cc2ncnc(Nc3ccc(F)c(Cl)c3)c2cc1OCCCN1CCOCC1"}
+                {"id": "VAL-FIXTURE-B", "name": "Synthetic fixture record B", "smiles": "CCO"}
             ],
             "dataset_name": "Validation Screening Library v1"
         }
@@ -479,12 +615,13 @@ class NativeValidationHarness:
             self.log("APP_E2E", f"Standardization experiment failed: {std_res}", "FAIL")
             return False
         ds2_id = std_res["output_dataset_id"]
+        std_exp_id = std_res["experiment_id"]
         self.log("APP_E2E", f"Standardization experiment completed. Dataset snapshot: {std_res['output_dataset_label']}", "PASS")
 
 
         # 4. Docking Screen
         rec_path = os.path.join(BASE_DIR, "benchmark_assets", "synthetic_4wkq_receptor_fixture.pdbqt")
-        lig_path = os.path.join(BASE_DIR, "benchmark_assets", "synthetic_erlotinib_ligand_fixture.pdbqt")
+        lig_path = os.path.join(BASE_DIR, "benchmark_assets", "synthetic_ligand_fixture_b.pdbqt")
         if not os.path.exists(rec_path) or not os.path.exists(lig_path):
             self.log("APP_E2E", "Synthetic PDBQT plumbing fixtures are missing from benchmark_assets/", "FAIL")
             self.report["e2e_application_workflow"] = {"success": False}
@@ -510,7 +647,7 @@ class NativeValidationHarness:
             "seed": 42,
             "result_origin": "COMPUTED",
             "receptor_pdbqt": rec_content,
-            "prepared_ligands": [{"id": "VAL-01", "name": "Osimertinib", "pdbqt": lig_content}]
+            "prepared_ligands": [{"id": "VAL-FIXTURE-B", "name": "Synthetic ligand fixture B", "pdbqt": lig_content}]
         }
         succ, dock_res = http_post(f"{self.app_url}/api/projects/{proj_id}/experiments/docking", dock_payload, timeout=30.0)
         if not succ:
@@ -519,6 +656,7 @@ class NativeValidationHarness:
             return False
 
         dock_exp_id = dock_res["experiment_id"]
+        dock_output_dataset_id = dock_res.get("output_dataset_id")
 
         # Verify it actually natively executed
         succ, exp_detail = http_get(f"{self.app_url}/api/experiments/{dock_exp_id}", timeout=10.0)
@@ -537,9 +675,23 @@ class NativeValidationHarness:
             and exp_metrics.get("tool_version", "").lower().startswith("autodock vina")
             and exp_metrics.get("worker_id")
             and exp_metrics.get("vina_binary_sha256")
+            and exp_metrics.get("vina_expected_binary_sha256")
+            and exp_metrics.get("vina_binary_sha256") == exp_metrics.get("vina_expected_binary_sha256")
+            and exp_metrics.get("vina_binary_digest_verified") is True
+            and exp_metrics.get("vina_path_verified") is True
+            and exp_metrics.get("vina_package_metadata_verified") is True
             and exp_metrics.get("stdout_sha256")
             and exp_metrics.get("output_pdbqt_hashes")
+            and exp_metrics.get("prepared_ligand_attestations")
+            and all(
+                attestation.get("prepared_ligand_id") == "VAL-FIXTURE-B"
+                and attestation.get("ligand_hash")
+                and attestation.get("output_pdbqt_hash")
+                and attestation.get("ligand_output_integrity", {}).get("verified") is True
+                for attestation in exp_metrics.get("prepared_ligand_attestations", [])
+            )
             and self.report.get("worker_readiness", {}).get("vina_identity_verified") is True
+            and self.report.get("worker_readiness", {}).get("vina_binary_digest_verified") is True
             and exp_metrics.get("vina_binary_sha256") == self.report.get("worker_readiness", {}).get("vina_binary_sha256")
         )
         if not strict_app_attestation:
@@ -557,7 +709,32 @@ class NativeValidationHarness:
             return False
         nodes_count = len(prov.get("nodes", []))
         edges_count = len(prov.get("edges", []))
-        self.log("APP_E2E", f"Provenance DAG verified: {nodes_count} nodes and {edges_count} relational edges", "PASS")
+        provenance_validation = validate_provenance_dag(
+            prov,
+            expected_edges=[
+                (ds1_id, std_exp_id),
+                (std_exp_id, ds2_id),
+                (ds2_id, dock_exp_id),
+                (dock_exp_id, dock_output_dataset_id),
+            ],
+        )
+        if not provenance_validation["valid"]:
+            self.log(
+                "APP_E2E",
+                f"Provenance graph rejected: dangling={len(provenance_validation['dangling_edges'])}, "
+                f"missing_expected={len(provenance_validation['missing_expected_edges'])}, "
+                f"cycle={provenance_validation['cycle_detected']}",
+                "FAIL",
+            )
+            self.report["e2e_application_workflow"] = {
+                "success": False,
+                "project_id": proj_id,
+                "provenance_nodes": nodes_count,
+                "provenance_edges": edges_count,
+                "provenance_validation": provenance_validation,
+            }
+            return False
+        self.log("APP_E2E", f"Provenance DAG resolved and acyclic: {nodes_count} nodes, {edges_count} edges, all expected E2E relationships present", "PASS")
 
         # 6. Reproducibility Manifest Check
         succ, manifest = http_get(f"{self.app_url}/api/experiments/{dock_exp_id}/manifest", timeout=10.0)
@@ -586,6 +763,7 @@ class NativeValidationHarness:
             "docking_experiment_id": dock_exp_id,
             "provenance_nodes": nodes_count,
             "provenance_edges": edges_count,
+            "provenance_validation": provenance_validation,
             "manifest_exported": True,
             "reproduction_match": rep_match,
             "reproduction_diff_reasons": rep_res.get("diff_reasons", []),
@@ -595,8 +773,14 @@ class NativeValidationHarness:
                 "tool_version": exp_metrics.get("tool_version"),
                 "exit_code": exp_metrics.get("exit_code"),
                 "vina_binary_sha256": exp_metrics.get("vina_binary_sha256"),
+                "vina_expected_binary_sha256": exp_metrics.get("vina_expected_binary_sha256"),
+                "vina_binary_digest_verified": exp_metrics.get("vina_binary_digest_verified"),
+                "vina_path": exp_metrics.get("vina_path"),
+                "vina_path_verified": exp_metrics.get("vina_path_verified"),
+                "vina_package_metadata_verified": exp_metrics.get("vina_package_metadata_verified"),
                 "stdout_sha256": exp_metrics.get("stdout_sha256"),
                 "output_pdbqt_hashes": exp_metrics.get("output_pdbqt_hashes"),
+                "prepared_ligand_attestations": exp_metrics.get("prepared_ligand_attestations"),
             },
         }
         return True
@@ -609,18 +793,33 @@ class NativeValidationHarness:
 
         preflight_ok = self.report.get("preflight_checks", {}).get("storage_writable", False)
         worker_live_ok = w_ready.get("health") == "OK"
-        w_rdk = w_ready.get("rdkit_ready", False)
+        w_rdk = bool(
+            w_ready.get("rdkit_ready") is True
+            and w_ready.get("rdkit_module_origin_verified") is True
+            and w_ready.get("rdkit_native_components_verified") is True
+            and w_ready.get("rdkit_package_metadata_verified") is True
+            and w_ready.get("rdkit_known_answer_verified") is True
+        )
         w_vina = bool(
             w_ready.get("vina_ready") is True
             and w_ready.get("vina_identity_verified") is True
+            and w_ready.get("vina_binary_digest_verified") is True
+            and w_ready.get("vina_path_verified") is True
+            and w_ready.get("vina_package_metadata_verified") is True
             and isinstance(w_ready.get("vina_version"), str)
             and w_ready.get("vina_version", "").lower().startswith("autodock vina")
             and w_ready.get("vina_binary_sha256")
+            and w_ready.get("vina_expected_binary_sha256")
+            and w_ready.get("vina_binary_sha256") == w_ready.get("vina_expected_binary_sha256")
             and w_ready.get("vina_version_output_sha256")
         )
 
         rdk_proof = self.report.get("rdkit_proof", {})
-        rdk_proof_ok = rdk_proof.get("is_native_rdkit") is True and rdk_proof.get("status") == "COMPLETED"
+        rdk_proof_ok = bool(
+            rdk_proof.get("is_native_rdkit") is True
+            and rdk_proof.get("known_answer_verified") is True
+            and rdk_proof.get("status") == "COMPLETED"
+        )
 
         rdk_suite = self.report.get("rdkit_integration_suite", {})
         rdk_suite_ok = bool(
@@ -628,16 +827,29 @@ class NativeValidationHarness:
             and rdk_suite.get("production_ready") is True
             and rdk_suite.get("successful_count") == 55
             and rdk_suite.get("failed_count") == 0
+            and rdk_suite.get("rdkit_attestation", {}).get("known_answer_verified") is True
+            and rdk_suite.get("rdkit_attestation", {}).get("native_components_verified") is True
+            and rdk_suite.get("rdkit_attestation", {}).get("package_metadata_verified") is True
             and all(sample.get("result_origin") == "COMPUTED" for sample in rdk_suite.get("sample_results", []))
         )
 
         vina_proof = self.report.get("vina_proof", {})
-        vina_proof_ok = vina_proof.get("is_native_vina_executed") is True and vina_proof.get("status") == "COMPLETED" and vina_proof.get("successful_count", 0) > 0 and vina_proof.get("failed_count", 0) == 0 and vina_proof.get("exit_code") == 0
+        vina_proof_ok = bool(
+            vina_proof.get("is_native_vina_executed") is True
+            and vina_proof.get("vina_binary_digest_verified") is True
+            and vina_proof.get("vina_path_verified") is True
+            and vina_proof.get("vina_package_metadata_verified") is True
+            and vina_proof.get("vina_binary_sha256") == vina_proof.get("vina_expected_binary_sha256")
+            and vina_proof.get("status") == "COMPLETED"
+            and vina_proof.get("successful_count", 0) > 0
+            and vina_proof.get("failed_count", 0) == 0
+            and vina_proof.get("exit_code") == 0
+        )
 
         e2e = self.report.get("e2e_application_workflow", {})
         e2e_succ = e2e.get("success", False)
 
-        prov_ok = e2e.get("provenance_edges", 0) > 0
+        prov_ok = e2e.get("provenance_validation", {}).get("valid") is True
         manifest_ok = e2e.get("manifest_exported") is True
         repro_ok = e2e.get("reproduction_match") is True
 
@@ -655,6 +867,12 @@ class NativeValidationHarness:
             "reproduction": repro_ok
         }
         self.report["mandatory_checks"] = mandatory_checks
+        self.report["claim_scope"] = (
+            "The supported runtime executed the attested native scientific-tool path, produced structurally valid "
+            "outputs, persisted execution evidence and provenance, and reproduced the tested result according to "
+            "the defined checks. This does not validate docking accuracy, binding prediction, efficacy, biological "
+            "validity, production fitness, or security certification."
+        )
 
         if all(mandatory_checks.values()):
             overall = "NATIVE_RUNTIME_VERIFIED"
@@ -672,7 +890,7 @@ class NativeValidationHarness:
             ("Native RDKit Capability", "worker_rdkit"),
             ("Native AutoDock Vina Capability", "worker_vina"),
             ("Native RDKit Kernel Execution", "rdkit_proof"),
-            ("55-Molecule Diversity Benchmark", "rdkit_suite"),
+            ("55-Molecule Native Execution Suite", "rdkit_suite"),
             ("Native AutoDock Vina Execution", "vina_proof"),
             ("App ↔ Worker E2E Workflow", "e2e"),
             ("Relational Provenance DAG", "provenance"),
@@ -698,7 +916,7 @@ class NativeValidationHarness:
             f.write(html_content)
 
         print("\n" + "=" * 80)
-        print("AIDD LAB OS — SCIENTIFIC VALIDATION SUMMARY")
+        print("AIDD LAB OS — NATIVE RUNTIME ATTESTATION SUMMARY")
         print("=" * 80)
         for row in self.report["summary_table"]:
             status_color = row["status"]
@@ -750,7 +968,7 @@ class NativeValidationHarness:
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <title>AIDD Lab OS — Native Scientific Runtime Validation Report</title>
+    <title>AIDD Lab OS — Native Runtime Attestation Report</title>
     <style>
         body {{ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: #0B0F19; color: #E2E8F0; margin: 0; padding: 40px; }}
         .container {{ max-width: 960px; margin: 0 auto; background: #131A2B; border: 1px solid #1E293B; border-radius: 8px; padding: 36px; box-shadow: 0 10px 30px rgba(0,0,0,0.6); }}
@@ -773,7 +991,7 @@ class NativeValidationHarness:
 </head>
 <body>
     <div class="container">
-        <h1>AIDD Lab OS — Native Scientific Runtime Validation</h1>
+        <h1>AIDD Lab OS — Native Runtime Attestation</h1>
         
         <div class="verdict-box">
             <div style="font-size: 11px; text-transform: uppercase; color: #94A3B8; font-weight: 700;">Overall Verification Verdict</div>
@@ -782,6 +1000,8 @@ class NativeValidationHarness:
                 Generated: {rep['generated_at'][:19].replace('T', ' ')} UTC • Validation Mode: <code>{rep['validation_mode']}</code>
             </div>
         </div>
+
+        <p style="font-size: 12px; color: #CBD5E1; line-height: 1.5;">{shown(rep.get('claim_scope'))}</p>
 
         <div class="grid-2">
             <div class="stat-card">
@@ -798,7 +1018,7 @@ class NativeValidationHarness:
 
         <h2>1. Executive Summary & Component Status</h2>
         <table>
-            <thead><tr><th>Scientific Validation Milestone</th><th>Result</th></tr></thead>
+            <thead><tr><th>Mandatory Runtime Check</th><th>Result</th></tr></thead>
             <tbody>{summary_rows}</tbody>
         </table>
 
@@ -806,6 +1026,7 @@ class NativeValidationHarness:
         <table>
             <tr><td style="width: 35%;">RDKit Native Readiness</td><td><span class="badge badge-{'pass' if mandatory.get('worker_rdkit') else 'fail'}">{'PASS' if mandatory.get('worker_rdkit') else 'FAIL'}</span></td></tr>
             <tr><td>Aspirin MW & Formula Proof</td><td><code>{shown(rdk.get('formula'))}</code> ({shown(rdk.get('molecular_weight'))} Da, LogP: {shown(rdk.get('logp'))})</td></tr>
+            <tr><td>Known-Answer Method</td><td>Aspirin and caffeine; HBA uses <code>rdkit.Chem.Lipinski.NumHAcceptors</code></td></tr>
             <tr><td>Origin Attribution</td><td><span class="badge badge-{'pass' if mandatory.get('rdkit_proof') else 'fail'}">{shown(rdk.get('result_origin'))}</span></td></tr>
             <tr><td>55-Molecule Native Execution Suite</td><td><b>{shown(rep.get('rdkit_integration_suite', {}).get('successful_count'))} / {shown(rep.get('rdkit_integration_suite', {}).get('total_compounds_tested'))}</b> across {shown(rep.get('rdkit_integration_suite', {}).get('categories_tested'))} categories — <span class="badge badge-{'pass' if mandatory.get('rdkit_suite') else 'fail'}">{'PASS' if mandatory.get('rdkit_suite') else 'FAIL'}</span></td></tr>
         </table>
@@ -813,7 +1034,7 @@ class NativeValidationHarness:
         <h2>3. AutoDock Vina Docking Execution</h2>
         <table>
             <tr><td style="width: 35%;">Vina Native Readiness</td><td><span class="badge badge-{'pass' if mandatory.get('worker_vina') else 'fail'}">{'PASS' if mandatory.get('worker_vina') else 'FAIL'}</span></td></tr>
-            <tr><td>Executable Identity</td><td>{shown(vina.get('tool'))} / {shown(vina.get('tool_version'))}<br><code>{shown(vina.get('vina_binary_sha256'))}</code></td></tr>
+            <tr><td>Executable Identity</td><td>{shown(vina.get('tool'))} / {shown(vina.get('tool_version'))}<br>actual: <code>{shown(vina.get('vina_binary_sha256'))}</code><br>expected: <code>{shown(vina.get('vina_expected_binary_sha256'))}</code></td></tr>
             <tr><td>Test Asset Class</td><td>{shown(vina.get('fixture_class'))} — native execution smoke test only; not scientific validation</td></tr>
             <tr><td>Fixture Search Box</td><td><code>{box_text}</code></td></tr>
             <tr><td>Output PDBQT & Affinity</td><td>{shown(vina.get('best_affinity_kcal_mol'))} kcal/mol ({shown(vina.get('poses_count'))} modes) — <span class="badge badge-{'pass' if mandatory.get('vina_proof') else 'fail'}">{'PASS' if mandatory.get('vina_proof') else 'FAIL'}</span></td></tr>
@@ -823,12 +1044,12 @@ class NativeValidationHarness:
         <table>
             <tr><td style="width: 35%;">Validation Project</td><td><code>{shown(e2e.get('project_id'))}</code></td></tr>
             <tr><td>Datasets & Immutability</td><td>{shown(e2e.get('datasets_created'))} snapshots reported</td></tr>
-            <tr><td>Relational Provenance DAG</td><td>{shown(e2e.get('provenance_nodes'))} nodes, {shown(e2e.get('provenance_edges'))} edges — <span class="badge badge-{'pass' if mandatory.get('provenance') else 'fail'}">{'PASS' if mandatory.get('provenance') else 'FAIL'}</span></td></tr>
+            <tr><td>Relational Provenance DAG</td><td>{shown(e2e.get('provenance_nodes'))} nodes, {shown(e2e.get('provenance_edges'))} edges; dangling={shown(len(e2e.get('provenance_validation', {}).get('dangling_edges', [])))}, cycle={shown(e2e.get('provenance_validation', {}).get('cycle_detected'))} — <span class="badge badge-{'pass' if mandatory.get('provenance') else 'fail'}">{'PASS' if mandatory.get('provenance') else 'FAIL'}</span></td></tr>
             <tr><td>Experiment Reproduction</td><td><span class="badge badge-{'pass' if mandatory.get('reproduction') else 'fail'}">{'PASS' if mandatory.get('reproduction') else 'FAIL'}</span> {shown(e2e.get('reproduction_diff_reasons')) if not mandatory.get('reproduction') else ''}</td></tr>
         </table>
 
         <div style="margin-top: 30px; font-size: 11px; color: #64748B; text-align: center; border-top: 1px solid #1E293B; padding-top: 16px;">
-            AIDD Lab OS runtime evidence report. A verified verdict requires every mandatory check above to pass.
+            Runtime attestation only. Synthetic docking fixtures are plumbing tests and do not establish docking accuracy or biological validity.
         </div>
     </div>
 </body>
@@ -851,7 +1072,7 @@ def configure_console_output():
 
 def main(argv: Optional[List[str]] = None) -> int:
     configure_console_output()
-    parser = argparse.ArgumentParser(description="AIDD Lab OS — Native Scientific Validation Harness")
+    parser = argparse.ArgumentParser(description="AIDD Lab OS — Native Runtime Attestation Harness")
     parser.add_argument("--mode", default="AUTO", choices=["AUTO", "DOCKER", "CONDA", "LOCAL"], help="Validation execution mode")
     parser.add_argument("--worker-url", default="http://127.0.0.1:8001", help="AIDD Scientific Worker endpoint")
     parser.add_argument("--app-url", default="http://127.0.0.1:8000", help="AIDD Lab OS Main App endpoint")
@@ -862,7 +1083,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     args = parser.parse_args(argv)
 
     print("=" * 80)
-    print("AIDD LAB OS — NATIVE SCIENTIFIC VALIDATION HARNESS (v1.4.0)")
+    print("AIDD LAB OS — NATIVE RUNTIME ATTESTATION HARNESS (v1.4.0)")
     print("=" * 80)
 
     harness = NativeValidationHarness(

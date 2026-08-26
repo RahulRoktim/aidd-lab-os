@@ -1,4 +1,4 @@
-# AIDD Scientific Worker (v1.3.0)
+# AIDD Scientific Worker (v1.4.0)
 
 Dedicated, decoupled local scientific execution service for **AIDD Lab OS**.
 
@@ -45,7 +45,7 @@ docker run -d -p 8001:8001 --name aidd-worker-instance aidd-worker
 | `AIDD_WORKER_PORT` | `8001` | Worker HTTP listening port |
 | `AIDD_WORKER_HOST` | `0.0.0.0` | Bind IP address |
 | `AIDD_WORKER_ID` | Auto-generated | Unique worker instance identifier |
-| `VINA_BIN` | `vina` | Path or command name for AutoDock Vina binary |
+| `VINA_BIN` | Pinned release path | Candidate path for AutoDock Vina diagnostics; it does not override release trust metadata |
 | `OBABEL_BIN` | `obabel` | Path for OpenBabel binary |
 | `MAX_DOCKING_TIMEOUT` | `600` | Subprocess execution timeout in seconds |
 
@@ -63,5 +63,9 @@ docker run -d -p 8001:8001 --name aidd-worker-instance aidd-worker
 
 ## 5. Security & Isolation
 - **No Arbitrary Shell Execution**: The worker only accepts typed, structured requests.
-- **Path Traversal Protection**: All artifact file accesses are sandboxed and validated against `jobs_data/{job_id}/`.
+- **Path Traversal Protection**: Conservative ligand/job/artifact identifiers and resolved-path checks keep all generated files inside `/data/jobs/{job_id}/`.
 - **Search Box Sanitization**: Vina bounding box coordinates and sizes are strictly validated as non-zero floats.
+- **Vina Release Attestation**: The Docker build, readiness endpoint, and pre-execution check require the exact canonical path, pinned Conda package record, version banner, and repository-controlled executable SHA-256 from `release_attestation.json`.
+- **RDKit Native Evidence**: The worker checks pinned package metadata, module origin, compiled extension modules, and two known-answer descriptor calculations. This is runtime evidence, not cryptographic authentication of the Python package.
+
+`NATIVE_RUNTIME_VERIFIED` is a runtime-and-provenance verdict only. It does not establish docking accuracy, binding prediction quality, biological efficacy, production fitness, or security certification. Synthetic docking fixtures test plumbing.

@@ -5,6 +5,7 @@ AIDD Worker - Configuration & Runtime Settings (v1.4.0)
 import os
 import socket
 import uuid
+import json
 
 WORKER_VERSION = "1.4.0"
 API_VERSION = "v1"
@@ -13,6 +14,9 @@ HOST = os.environ.get("AIDD_WORKER_HOST", "0.0.0.0")
 PORT = int(os.environ.get("AIDD_WORKER_PORT", "8001"))
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+RELEASE_ATTESTATION_PATH = os.path.join(BASE_DIR, "release_attestation.json")
+with open(RELEASE_ATTESTATION_PATH, "r", encoding="utf-8") as _release_file:
+    RELEASE_ATTESTATION = json.load(_release_file)
 
 # Persistent storage configuration
 DEFAULT_DATA_DIR = os.path.join(BASE_DIR, "..", "data")
@@ -24,8 +28,12 @@ ARTIFACTS_DIR = os.environ.get("AIDD_WORKER_ARTIFACTS_DIR", os.path.join(DATA_DI
 os.makedirs(JOBS_DIR, exist_ok=True)
 os.makedirs(ARTIFACTS_DIR, exist_ok=True)
 
-# Allowed tool binary paths
-VINA_EXECUTABLE = os.environ.get("VINA_BIN", "vina")
+# The runtime may select a candidate path, but trust is anchored exclusively in
+# repository-controlled release metadata and never in PATH or request data.
+VINA_EXECUTABLE = os.environ.get(
+    "VINA_BIN",
+    RELEASE_ATTESTATION["vina"]["expected_path"],
+)
 OBABEL_EXECUTABLE = os.environ.get("OBABEL_BIN", "obabel")
 
 # Job execution safety limits

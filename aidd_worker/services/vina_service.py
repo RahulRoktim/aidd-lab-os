@@ -8,12 +8,19 @@ import time
 import subprocess
 import hashlib
 import json
+import math
+from pathlib import Path
 from typing import Dict, Any, List, Tuple, Optional
 
 from aidd_worker import config
 from aidd_worker.models import DockingJobRequest, FailureRecord, ArtifactInfo
 from aidd_worker.services.capability_service import detect_vina
-from aidd_worker.services.artifact_service import save_job_artifact, compute_sha256
+from aidd_worker.services.artifact_service import (
+    save_job_artifact,
+    compute_sha256,
+    resolve_job_directory,
+    resolve_job_path,
+)
 
 # Synthetic receptor-shaped PDBQT fixture for plumbing tests only.  It is not a
 # complete structure from PDB 4WKQ and is not scientific validation material.
@@ -38,8 +45,8 @@ TER
 """
 
 # Synthetic ligand-shaped PDBQT fixture for plumbing tests only.
-ERLOTINIB_LIGAND_PDBQT = """REMARK  NAME = Erlotinib_Ligand
-REMARK  ASSET_CLASS = SYNTHETIC_PLUMBING_FIXTURE
+SYNTHETIC_LIGAND_FIXTURE_B_PDBQT = """REMARK  NAME = SYNTHETIC_LIGAND_FIXTURE_B
+REMARK  ASSET_CLASS = SYNTHETIC_PLUMBING_FIXTURE; NOT A PREPARED DRUG STRUCTURE
 ROOT
 ATOM      1  C1  UNL     1      22.450   0.620  52.150  1.00  0.00     0.050 C 
 ATOM      2  C2  UNL     1      23.120   1.750  52.650  1.00  0.00     0.120 A 
@@ -111,18 +118,118 @@ def validate_pdbqt_format(content: str, filename_hint: str = "Structure") -> Tup
     if not has_atom_records:
         return False, f"{filename_hint} has no ATOM or HETATM coordinate records"
 
-    # Check for non-empty coordinate columns
-    valid_coord_count = 0
-    for line in lines:
-        if line.startswith("ATOM") or line.startswith("HETATM"):
-            parts = line.split()
-            if len(parts) >= 7:
-                valid_coord_count += 1
-
-    if valid_coord_count == 0:
-        return False, f"{filename_hint} contains malformed ATOM lines without standard 3D coordinates"
+    poses, parse_error = parse_pdbqt_atom_poses(content)
+    if parse_error or not poses or not poses[0]:
+        return False, parse_error or f"{filename_hint} contains malformed ATOM lines without finite 3D coordinates"
 
     return True, None
+
+
+def parse_pdbqt_atom_poses(content: str) -> Tuple[List[List[Dict[str, Any]]], Optional[str]]:
+    """Parse ordered PDBQT atom identities and finite coordinates per MODEL."""
+    poses: List[List[Dict[str, Any]]] = []
+    current: List[Dict[str, Any]] = []
+    has_models = False
+    for line_number, line in enumerate((content or "").splitlines(), start=1):
+        record = line[:6].strip().upper()
+        if record == "MODEL":
+            has_models = True
+            if current:
+                poses.append(current)
+                current = []
+            continue
+        if record == "ENDMDL":
+            if current:
+                poses.append(current)
+                current = []
+            continue
+        if record not in {"ATOM", "HETATM"}:
+            continue
+        try:
+            x = float(line[30:38])
+            y = float(line[38:46])
+            z = float(line[46:54])
+        except (TypeError, ValueError):
+            return [], f"Malformed PDBQT coordinates at line {line_number}"
+        if not all(math.isfinite(value) for value in (x, y, z)):
+            return [], f"Non-finite PDBQT coordinates at line {line_number}"
+        fields = line.split()
+        if not fields:
+            return [], f"Malformed PDBQT atom record at line {line_number}"
+        current.append({
+            "atom_name": line[12:16].strip(),
+            "atom_type": fields[-1].upper(),
+            "x": x,
+            "y": y,
+            "z": z,
+        })
+    if current:
+        poses.append(current)
+    if has_models and not poses:
+        return [], "PDBQT MODEL records contained no atoms"
+    return poses, None
+
+
+def verify_ligand_output_integrity(
+    submitted_ligand: str,
+    output_pdbqt: str,
+    search_box: Any,
+    expected_pose_count: int,
+) -> Tuple[bool, Dict[str, Any], Optional[str]]:
+    submitted_poses, submitted_error = parse_pdbqt_atom_poses(submitted_ligand)
+    output_poses, output_error = parse_pdbqt_atom_poses(output_pdbqt)
+    if submitted_error or not submitted_poses:
+        return False, {}, submitted_error or "Submitted ligand contains no atoms"
+    if output_error or not output_poses:
+        return False, {}, output_error or "Output contains no atom-bearing poses"
+
+    submitted_atoms = submitted_poses[0]
+    submitted_identity = [(atom["atom_name"], atom["atom_type"]) for atom in submitted_atoms]
+    identity_hash = _sha256_text(json.dumps(submitted_identity, separators=(",", ":")))
+    pose_counts = []
+    centroids = []
+    margin = 5.0
+    for pose_index, atoms in enumerate(output_poses, start=1):
+        pose_counts.append(len(atoms))
+        output_identity = [(atom["atom_name"], atom["atom_type"]) for atom in atoms]
+        if output_identity != submitted_identity:
+            return False, {
+                "submitted_atom_count": len(submitted_atoms),
+                "output_pose_atom_counts": pose_counts,
+                "submitted_atom_identity_sha256": identity_hash,
+            }, f"Output pose {pose_index} atom count/type/name sequence does not match the submitted ligand"
+        centroid = {
+            axis: sum(atom[axis] for atom in atoms) / len(atoms)
+            for axis in ("x", "y", "z")
+        }
+        centroids.append(centroid)
+        for axis in ("x", "y", "z"):
+            center = float(getattr(search_box, f"center_{axis}"))
+            half_size = float(getattr(search_box, f"size_{axis}")) / 2.0
+            if abs(centroid[axis] - center) > half_size + margin:
+                return False, {
+                    "submitted_atom_count": len(submitted_atoms),
+                    "output_pose_atom_counts": pose_counts,
+                    "submitted_atom_identity_sha256": identity_hash,
+                    "pose_centroids": centroids,
+                }, f"Output pose {pose_index} centroid falls outside the requested search region plus {margin} Å integrity margin"
+
+    if len(output_poses) != expected_pose_count:
+        return False, {
+            "submitted_atom_count": len(submitted_atoms),
+            "output_pose_atom_counts": pose_counts,
+            "submitted_atom_identity_sha256": identity_hash,
+            "pose_centroids": centroids,
+        }, f"Output PDBQT pose count {len(output_poses)} does not match parsed Vina table count {expected_pose_count}"
+
+    return True, {
+        "submitted_atom_count": len(submitted_atoms),
+        "output_pose_atom_counts": pose_counts,
+        "submitted_atom_identity_sha256": identity_hash,
+        "pose_centroids": centroids,
+        "search_region_integrity_margin_angstrom": margin,
+        "verified": True,
+    }, None
 
 def parse_vina_log_output(log_text: str) -> List[Dict[str, Any]]:
     poses = []
@@ -172,8 +279,7 @@ def _sha256_text(value: str) -> str:
 
 def execute_docking_job(job_id: str, request: DockingJobRequest) -> Tuple[List[Dict[str, Any]], List[FailureRecord], List[ArtifactInfo], Dict[str, Any]]:
     vina_info = detect_vina()
-    job_dir = os.path.join(config.JOBS_DIR, job_id)
-    os.makedirs(job_dir, exist_ok=True)
+    job_dir = resolve_job_directory(job_id, create=True)
 
     artifacts = []
     failures = []
@@ -190,7 +296,7 @@ def execute_docking_job(job_id: str, request: DockingJobRequest) -> Tuple[List[D
         raise ValueError(f"Invalid search box dimensions: ({sb.size_x}, {sb.size_y}, {sb.size_z}). All sizes must be positive (> 0 Å).")
 
     # 3. Save Receptor PDBQT
-    rec_path = os.path.join(job_dir, "receptor.pdbqt")
+    rec_path = resolve_job_path(job_id, "receptor.pdbqt")
     with open(rec_path, "w", encoding="utf-8") as f:
         f.write(request.receptor_pdbqt.strip())
     rec_art = save_job_artifact(job_id, "receptor.pdbqt", request.receptor_pdbqt, file_type="pdbqt")
@@ -219,16 +325,16 @@ def execute_docking_job(job_id: str, request: DockingJobRequest) -> Tuple[List[D
             continue
 
         lig_filename = f"{lig_id}.pdbqt"
-        lig_path = os.path.join(job_dir, lig_filename)
+        lig_path = resolve_job_path(job_id, lig_filename)
         with open(lig_path, "w", encoding="utf-8") as f:
             f.write(lig_content.strip())
         lig_art = save_job_artifact(job_id, lig_filename, lig_content, file_type="pdbqt")
         artifacts.append(lig_art)
 
         out_pdbqt_filename = f"{lig_id}_out.pdbqt"
-        out_pdbqt_path = os.path.join(job_dir, out_pdbqt_filename)
+        out_pdbqt_path = resolve_job_path(job_id, out_pdbqt_filename)
         log_filename = f"{lig_id}_vina.log"
-        log_path = os.path.join(job_dir, log_filename)
+        log_path = resolve_job_path(job_id, log_filename)
 
         config_lines = [
             f"receptor = {rec_path}",
@@ -246,7 +352,7 @@ def execute_docking_job(job_id: str, request: DockingJobRequest) -> Tuple[List[D
             f"out = {out_pdbqt_path}",
         ]
         config_text = "\n".join(config_lines) + "\n"
-        config_path = os.path.join(job_dir, f"{lig_id}_config.txt")
+        config_path = resolve_job_path(job_id, f"{lig_id}_config.txt")
         with open(config_path, "w", encoding="utf-8") as f:
             f.write(config_text)
         conf_art = save_job_artifact(job_id, f"{lig_id}_config.txt", config_text, file_type="config")
@@ -260,6 +366,24 @@ def execute_docking_job(job_id: str, request: DockingJobRequest) -> Tuple[List[D
                 for stale_path in (out_pdbqt_path, log_path):
                     if os.path.exists(stale_path):
                         os.remove(stale_path)
+                execution_vina = detect_vina()
+                if not (
+                    execution_vina.get("identity_verified")
+                    and execution_vina.get("binary_digest_verified")
+                    and execution_vina.get("path_verified")
+                    and execution_vina.get("package_metadata_verified")
+                ):
+                    failures.append(FailureRecord(
+                        molecule_id=lig_id,
+                        molecule_name=lig_name,
+                        smiles=lig.get("smiles", ""),
+                        error_type="VinaBinaryAttestationFailed",
+                        error_message=execution_vina.get("detection_error") or "Vina failed release attestation immediately before execution",
+                    ))
+                    vina_info = execution_vina
+                    continue
+                vina_info = execution_vina
+                execution_started_ns = time.time_ns()
                 cmd = [vina_info["path"], "--config", config_path]
                 proc = subprocess.run(cmd, capture_output=True, text=True, timeout=config.MAX_DOCKING_TIMEOUT_SECONDS)
                 stdout = proc.stdout or ""
@@ -315,10 +439,24 @@ def execute_docking_job(job_id: str, request: DockingJobRequest) -> Tuple[List[D
                     ))
                     continue
 
+                output_stat = os.stat(out_pdbqt_path)
+                output_created_after_start = output_stat.st_mtime_ns >= execution_started_ns
+                output_path_verified = Path(out_pdbqt_path).resolve().parent == Path(job_dir).resolve()
+                if not output_created_after_start or not output_path_verified:
+                    failures.append(FailureRecord(
+                        molecule_id=lig_id,
+                        molecule_name=lig_name,
+                        smiles=lig.get("smiles", ""),
+                        error_type="VinaOutputSandboxOrTimestampError",
+                        error_message="Output PDBQT was not freshly created inside the current job sandbox",
+                    ))
+                    continue
+
                 with open(out_pdbqt_path, "rb") as output_file:
                     output_bytes = output_file.read()
+                output_text = output_bytes.decode("utf-8", errors="replace")
                 output_valid, output_error = validate_pdbqt_format(
-                    output_bytes.decode("utf-8", errors="replace"),
+                    output_text,
                     filename_hint=f"Vina output for {lig_id}",
                 )
                 if not output_valid:
@@ -331,6 +469,22 @@ def execute_docking_job(job_id: str, request: DockingJobRequest) -> Tuple[List[D
                     ))
                     continue
 
+                integrity_ok, integrity_evidence, integrity_error = verify_ligand_output_integrity(
+                    lig_content,
+                    output_text,
+                    sb,
+                    expected_pose_count=len(poses),
+                )
+                if not integrity_ok:
+                    failures.append(FailureRecord(
+                        molecule_id=lig_id,
+                        molecule_name=lig_name,
+                        smiles=lig.get("smiles", ""),
+                        error_type="VinaLigandOutputIntegrityError",
+                        error_message=integrity_error or "Output PDBQT is not identity-compatible with the submitted ligand",
+                    ))
+                    continue
+
                 out_art = save_job_artifact(job_id, out_pdbqt_filename, output_bytes, file_type="pdbqt_output")
                 artifacts.append(out_art)
 
@@ -338,6 +492,8 @@ def execute_docking_job(job_id: str, request: DockingJobRequest) -> Tuple[List[D
                 results.append({
                     "molecule_id": lig_id,
                     "molecule_name": lig_name,
+                    "prepared_ligand_id": lig_id,
+                    "prepared_ligand_name": lig_name,
                     "docking_score": best_pose["affinity_kcal_mol"],
                     "best_affinity_kcal_mol": best_pose["affinity_kcal_mol"],
                     "poses_count": len(poses),
@@ -350,6 +506,14 @@ def execute_docking_job(job_id: str, request: DockingJobRequest) -> Tuple[List[D
                     "tool": "AutoDock Vina",
                     "tool_version": vina_info["version"],
                     "vina_binary_sha256": vina_info["binary_sha256"],
+                    "vina_expected_binary_sha256": vina_info["expected_binary_sha256"],
+                    "vina_binary_digest_verified": vina_info["binary_digest_verified"],
+                    "vina_path": vina_info["path"],
+                    "vina_path_verified": vina_info["path_verified"],
+                    "vina_package_metadata_verified": vina_info["package_metadata_verified"],
+                    "output_created_after_start": output_created_after_start,
+                    "output_path_verified": output_path_verified,
+                    "ligand_output_integrity": integrity_evidence,
                     "result_origin": "COMPUTED"
                 })
 
@@ -378,7 +542,7 @@ def execute_docking_job(job_id: str, request: DockingJobRequest) -> Tuple[List[D
                     molecule_name=lig_name,
                     smiles=lig.get("smiles", ""),
                     error_type="VinaBinaryUnavailable",
-                    error_message="AutoDock Vina binary is not installed in the worker environment (PATH lookup failed)."
+                    error_message=vina_info.get("detection_error") or "AutoDock Vina failed trusted release attestation."
                 ))
             else:
                 # Demo fallback execution
@@ -424,6 +588,12 @@ def execute_docking_job(job_id: str, request: DockingJobRequest) -> Tuple[List[D
         "tool": "AutoDock Vina" if vina_info.get("identity_verified") else "AIDD Vina-table demo fixture",
         "tool_version": vina_info.get("version") or "demo-fixture-v1",
         "vina_binary_sha256": vina_info.get("binary_sha256"),
+        "vina_expected_binary_sha256": vina_info.get("expected_binary_sha256"),
+        "vina_binary_digest_verified": vina_info.get("binary_digest_verified", False),
+        "vina_path": vina_info.get("path"),
+        "vina_expected_path": vina_info.get("expected_path"),
+        "vina_path_verified": vina_info.get("path_verified", False),
+        "vina_package_metadata_verified": vina_info.get("package_metadata_verified", False),
         "vina_version_output_sha256": vina_info.get("version_output_sha256"),
         "vina_identity_verified": bool(vina_info.get("identity_verified")),
         "production_ready": bool(vina_info.get("installed") and vina_info.get("identity_verified")),
@@ -433,6 +603,16 @@ def execute_docking_job(job_id: str, request: DockingJobRequest) -> Tuple[List[D
         "stderr_sha256": _sha256_text(stderr_text) if stderr_text else None,
         "receptor_sha256": rec_art.sha256_hash,
         "output_pdbqt_hashes": [r.get("output_pdbqt_hash") for r in results if r.get("output_pdbqt_hash")],
+        "prepared_ligand_attestations": [
+            {
+                "prepared_ligand_id": result.get("prepared_ligand_id"),
+                "prepared_ligand_name": result.get("prepared_ligand_name"),
+                "ligand_hash": result.get("ligand_hash"),
+                "output_pdbqt_hash": result.get("output_pdbqt_hash"),
+                "ligand_output_integrity": result.get("ligand_output_integrity"),
+            }
+            for result in results
+        ],
         "duration_seconds": duration,
         "search_box": sb.dict(),
         "exhaustiveness": request.exhaustiveness or 16,

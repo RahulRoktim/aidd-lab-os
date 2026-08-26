@@ -4,6 +4,7 @@ AIDD Worker - Data Schemas & Job Models (v1.4.0)
 
 from typing import List, Dict, Any, Optional
 from pydantic import BaseModel, Field, validator
+import re
 from enum import Enum
 
 class JobStatus(str, Enum):
@@ -85,6 +86,21 @@ class DockingJobRequest(BaseModel):
     execution_mode: Optional[ExecutionMode] = ExecutionMode.NATIVE
     metadata: Optional[Dict[str, Any]] = None
 
+    @validator("ligands", allow_reuse=True)
+    def validate_ligand_identifiers(cls, ligands: List[Dict[str, str]]) -> List[Dict[str, str]]:
+        for index, ligand in enumerate(ligands):
+            ligand_id = ligand.get("id")
+            if not isinstance(ligand_id, str) or not re.fullmatch(r"[A-Za-z0-9_-]+", ligand_id):
+                raise ValueError(
+                    f"Ligand at index {index} requires an ID matching [A-Za-z0-9_-]+; "
+                    "path separators, dots, whitespace, newlines, and control characters are forbidden"
+                )
+            if len(ligand_id) > 128:
+                raise ValueError(f"Ligand ID at index {index} exceeds 128 characters")
+        if len({ligand["id"] for ligand in ligands}) != len(ligands):
+            raise ValueError("Ligand IDs must be unique within a docking request")
+        return ligands
+
 class ArtifactInfo(BaseModel):
     name: str
     file_type: str
@@ -137,11 +153,22 @@ class ReadinessResponse(BaseModel):
     rdkit_ready: bool
     rdkit_version: Optional[str] = None
     rdkit_backend: str
+    rdkit_module_path: Optional[str] = None
+    rdkit_module_origin_verified: bool = False
+    rdkit_native_components_verified: bool = False
+    rdkit_package_metadata_verified: bool = False
+    rdkit_known_answer_verified: bool = False
+    rdkit_known_answer_results: List[Dict[str, Any]] = []
     vina_ready: bool
     vina_version: Optional[str] = None
     vina_path: Optional[str] = None
+    vina_expected_path: Optional[str] = None
     vina_identity_verified: bool = False
     vina_binary_sha256: Optional[str] = None
+    vina_expected_binary_sha256: Optional[str] = None
+    vina_binary_digest_verified: bool = False
+    vina_path_verified: bool = False
+    vina_package_metadata_verified: bool = False
     vina_version_output_sha256: Optional[str] = None
     openbabel_ready: bool
     environment_sha256: str

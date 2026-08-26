@@ -2,6 +2,8 @@
 
 **AIDD Lab OS** is a provenance-tracking computational drug discovery workspace. It separates project management, dataset versioning, decision logging, and candidate ranking from native scientific computation via a dedicated **AIDD Scientific Worker**.
 
+`NATIVE_RUNTIME_VERIFIED` has a narrow meaning: the supported runtime executed the attested native scientific-tool path, produced structurally valid outputs, persisted execution evidence and provenance, and reproduced the tested result according to the defined checks. It does not validate docking accuracy, binding prediction, efficacy, biological validity, production fitness, or security certification. Synthetic docking fixtures are plumbing tests only.
+
 ---
 
 ## 1. System Architecture
@@ -33,11 +35,11 @@
 
 The platform strictly categorizes and tracks the origin of every scientific result:
 
-| Mode | Scientific Backend | Production Ready | Result Origin Tag |
+| Mode | Scientific Backend | Native Attestation Eligible | Result Origin Tag |
 |---|---|---|---|
-| `NATIVE` | Genuine RDKit C++ / Native AutoDock Vina binary | **YES** | `COMPUTED` |
-| `IMPORT_ONLY` | Structured import from verified laboratory/cluster runs | **YES** | `IMPORTED` |
-| `DEMO_FALLBACK` | Calibrated pure-Python reference engine / fixtures | **NO (Non-Production)** | `DEMO` / `SIMULATED` |
+| `NATIVE` | Attested RDKit native modules / exact trusted AutoDock Vina binary | **YES, when all checks pass** | `COMPUTED` |
+| `IMPORT_ONLY` | Structured import from an external laboratory/cluster run | **NO** | `IMPORTED` |
+| `DEMO_FALLBACK` | Pure-Python reference engine / fixtures | **NO** | `DEMO` / `SIMULATED` |
 
 ---
 
@@ -52,7 +54,7 @@ docker compose up --build
 
 - **AIDD Lab OS Web App**: `http://localhost:8000`
 - **AIDD Scientific Worker**: `http://localhost:8001`
-- **Persistent Storage**: Mounted to `aidd-scientific-data` volume (`/data/jobs` and `/data/artifacts`).
+- **Persistent Storage**: Mounted to `aidd-scientific-data` (`/data/jobs`, `/data/artifacts`, and `/data/aidd_lab.db`).
 
 ---
 
@@ -100,11 +102,11 @@ CPU Cores Available:   16
 RDKit Cheminformatics: [READY]
   - Version:           2023.09.5
   - Backend:           C++ Native Extension
-  - Production Ready:  True
+  - Native Attested:   True
 AutoDock Vina Docking: [READY]
   - Executable Path:   /opt/conda/envs/aidd-worker-env/bin/vina
   - Version:           AutoDock Vina v1.2.5
-  - Production Ready:  True
+  - Native Attested:   True
 
 --- SCIENTIFIC ENVIRONMENT FINGERPRINT ---
 Environment SHA-256:   28257acbf678cbd591f2f3cc4eb5d64fca9a81fd77693cc3e04b6edd86c34ceb
@@ -126,7 +128,7 @@ Test Tiers:
 2. **Tier 2 (FIXTURE)**: Multi-pose AutoDock Vina log parsing, binding affinity tables, RMSD bounds.
 3. **Tier 3 (NATIVE INTEGRATION)**: Real native RDKit and AutoDock Vina subprocess execution (explicitly reports `SKIPPED` if native binaries are not installed).
 4. **Tier 4 (WORKER QUEUE)**: Worker health, readiness endpoint, job queue lifecycle, path traversal guards.
-5. **Tier 5 (SCIENTIFIC AUDIT)**: 14-stage scientific software audit, reference benchmarks (Caffeine, Aspirin, etc.), experiment immutability, automated experiment reproduction.
+5. **Tier 5 (SCIENTIFIC AUDIT)**: 14-stage runtime audit, known-answer descriptor checks (caffeine, aspirin, etc.), locked scientific records, and automated experiment reproduction.
 6. **Tier 6 (E2E WORKFLOW)**: Complete computational campaign from raw SMILES ingestion to composite multi-parameter lead candidate selection.
 
 ---
@@ -134,5 +136,13 @@ Test Tiers:
 ## 6. Scientific Reproducibility Model
 
 - **Environment Fingerprint (`environment_sha256`)**: Normalized SHA-256 cryptographic hash of operating system, Python runtime, compiler, RDKit version, Vina version, and library versions.
-- **Immutable Experiment Snapshots**: Experiments are automatically locked upon completion (`is_locked = 1`). Historical parameters cannot be modified retroactively; additional observations are logged to an append-only notes trail.
+- **Locked Scientific Experiment Records**: After `is_locked = 1`, a database trigger rejects changes to scientific fields such as parameters, metrics, tooling, status, and dataset references. Notes and reproduction-link fields are the explicitly permitted appendable metadata.
 - **Reproducibility Manifests & ZIP Bundles**: Complete export of all datasets, configurations, decision logs, failure records, and artifacts with `checksums.sha256` verification.
+
+## 7. Docker Native Trust Model
+
+The supported native runtime is the repository's `linux-64` Docker worker. Repository-controlled metadata in `aidd_worker/release_attestation.json` pins the base-image digest, exact Conda package records, expected Vina path, and expected Vina executable SHA-256. The image build fails if the installed package or executable differs. Worker readiness and every docking execution independently recheck the canonical path, package record, version banner, and executable hash. `VINA_BIN` can select a candidate for diagnostics, but it cannot change the trusted identity.
+
+For release `aidd-worker-1.4.0-linux-64`, the trusted Vina executable SHA-256 is `04598a43755cd0e258ac62fc88dcd886aaac6a3167b8ff8712ddc4c07090a019`. A matching banner, plausible output, or zero exit code cannot substitute for this release trust anchor.
+
+RDKit attestation is not described as cryptographic module authentication. It requires the pinned Conda package record and version, expected module origin, compiled extension modules, and passing aspirin and caffeine known-answer calculations.

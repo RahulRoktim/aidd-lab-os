@@ -17,7 +17,7 @@ from aidd_worker.models import (
 from aidd_worker.services.capability_service import detect_rdkit, detect_vina
 from aidd_worker.services.rdkit_service import calculate_descriptors_batch, standardize_molecules_batch
 from aidd_worker.services.vina_service import execute_docking_job
-from aidd_worker.services.artifact_service import save_job_artifact, create_checksum_manifest, compute_sha256
+from aidd_worker.services.artifact_service import save_job_artifact, create_checksum_manifest, compute_sha256, resolve_job_path
 
 # In-memory registry of executed jobs (persisted to disk in jobs_data/{job_id}/)
 _JOBS_REGISTRY: Dict[str, JobResult] = {}
@@ -29,9 +29,7 @@ def gen_job_id(prefix: str = "job") -> str:
     return f"{prefix}_{uuid.uuid4().hex[:12]}"
 
 def save_job_to_disk(job: JobResult):
-    job_dir = os.path.join(config.JOBS_DIR, job.job_id)
-    os.makedirs(job_dir, exist_ok=True)
-    manifest_path = os.path.join(job_dir, "job_manifest.json")
+    manifest_path = resolve_job_path(job.job_id, "job_manifest.json", create_directory=True)
     with open(manifest_path, "w", encoding="utf-8") as f:
         f.write(job.model_dump_json(indent=2))
 
@@ -40,7 +38,7 @@ def get_job(job_id: str) -> Optional[JobResult]:
         return _JOBS_REGISTRY[job_id]
     
     # Try reading from disk
-    manifest_path = os.path.join(config.JOBS_DIR, job_id, "job_manifest.json")
+    manifest_path = resolve_job_path(job_id, "job_manifest.json")
     if os.path.exists(manifest_path):
         with open(manifest_path, "r", encoding="utf-8") as f:
             data = json.load(f)
@@ -59,7 +57,8 @@ def run_descriptor_job(request: DescriptorJobRequest) -> JobResult:
     started_at = now_iso()
 
     rdkit_info = detect_rdkit()
-    tool_name = "RDKit" if rdkit_info["installed"] else "AIDD Python Reference Engine (Non-Production Fallback)"
+    rdkit_verified = bool(rdkit_info.get("installed") and rdkit_info.get("production_ready"))
+    tool_name = "RDKit" if rdkit_verified else "AIDD Python Reference Engine (Non-Production Fallback)"
     tool_ver = rdkit_info["version"] or "1.3.0"
 
     job = JobResult(
@@ -70,7 +69,7 @@ def run_descriptor_job(request: DescriptorJobRequest) -> JobResult:
         worker_id=config.WORKER_ID, worker_version=config.WORKER_VERSION,
         tool=tool_name,
         tool_version=tool_ver,
-        production_ready=rdkit_info["installed"],
+        production_ready=rdkit_verified,
         created_at=created_at,
         started_at=started_at,
         parameters={"total_molecules": len(request.molecules)}
@@ -129,7 +128,8 @@ def run_standardize_job(request: StandardizeJobRequest) -> JobResult:
     started_at = now_iso()
 
     rdkit_info = detect_rdkit()
-    tool_name = "RDKit Standardizer" if rdkit_info["installed"] else "AIDD Standardization Kernel (Non-Production Fallback)"
+    rdkit_verified = bool(rdkit_info.get("installed") and rdkit_info.get("production_ready"))
+    tool_name = "RDKit Standardizer" if rdkit_verified else "AIDD Standardization Kernel (Non-Production Fallback)"
     tool_ver = rdkit_info["version"] or "1.3.0"
 
     job = JobResult(
@@ -140,7 +140,7 @@ def run_standardize_job(request: StandardizeJobRequest) -> JobResult:
         worker_id=config.WORKER_ID, worker_version=config.WORKER_VERSION,
         tool=tool_name,
         tool_version=tool_ver,
-        production_ready=rdkit_info["installed"],
+        production_ready=rdkit_verified,
         created_at=created_at,
         started_at=started_at,
         parameters={"remove_salts": request.remove_salts, "neutralize": request.neutralize_charges}
@@ -201,7 +201,13 @@ def run_docking_job(request: DockingJobRequest) -> JobResult:
     started_at = now_iso()
 
     vina_info = detect_vina()
-    vina_verified = bool(vina_info.get("installed") and vina_info.get("identity_verified"))
+    vina_verified = bool(
+        vina_info.get("installed")
+        and vina_info.get("identity_verified")
+        and vina_info.get("binary_digest_verified")
+        and vina_info.get("path_verified")
+        and vina_info.get("package_metadata_verified")
+    )
     tool_name = "AutoDock Vina" if vina_verified else "AIDD Vina-table demo fixture"
     tool_ver = vina_info.get("version") or "demo-fixture-v1"
 
@@ -243,7 +249,17 @@ def run_docking_job(request: DockingJobRequest) -> JobResult:
             and not failures
             and meta.get("exit_code") == 0
             and meta.get("vina_identity_verified") is True
-            and all(result.get("result_origin") == "COMPUTED" for result in results)
+            and meta.get("vina_binary_digest_verified") is True
+            and meta.get("vina_path_verified") is True
+            and meta.get("vina_package_metadata_verified") is True
+            and all(
+                result.get("result_origin") == "COMPUTED"
+                and result.get("vina_binary_digest_verified") is True
+                and result.get("output_created_after_start") is True
+                and result.get("output_path_verified") is True
+                and result.get("ligand_output_integrity", {}).get("verified") is True
+                for result in results
+            )
         )
         demo_success = bool(
             results
@@ -275,11 +291,18 @@ def run_docking_job(request: DockingJobRequest) -> JobResult:
             "tool_version": job.tool_version,
             "vina_identity_verified": meta.get("vina_identity_verified", False),
             "vina_binary_sha256": meta.get("vina_binary_sha256"),
+            "vina_expected_binary_sha256": meta.get("vina_expected_binary_sha256"),
+            "vina_binary_digest_verified": meta.get("vina_binary_digest_verified", False),
+            "vina_path": meta.get("vina_path"),
+            "vina_expected_path": meta.get("vina_expected_path"),
+            "vina_path_verified": meta.get("vina_path_verified", False),
+            "vina_package_metadata_verified": meta.get("vina_package_metadata_verified", False),
             "vina_version_output_sha256": meta.get("vina_version_output_sha256"),
             "stdout_sha256": meta.get("stdout_sha256"),
             "stderr_sha256": meta.get("stderr_sha256"),
             "receptor_sha256": meta.get("receptor_sha256"),
             "output_pdbqt_hashes": meta.get("output_pdbqt_hashes", []),
+            "prepared_ligand_attestations": meta.get("prepared_ligand_attestations", []),
         }
         job.reproducibility_hash = meta.get("reproducibility_hash") or compute_sha256(results_json)
 

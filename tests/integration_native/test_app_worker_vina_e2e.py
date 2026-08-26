@@ -24,7 +24,7 @@ def test_app_worker_vina_e2e_true():
     # 2. Read real benchmark assets
     base_dir = os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
     rec_path = os.path.join(base_dir, "benchmark_assets", "synthetic_4wkq_receptor_fixture.pdbqt")
-    lig_path = os.path.join(base_dir, "benchmark_assets", "synthetic_erlotinib_ligand_fixture.pdbqt")
+    lig_path = os.path.join(base_dir, "benchmark_assets", "synthetic_ligand_fixture_b.pdbqt")
 
     if not os.path.exists(rec_path) or not os.path.exists(lig_path):
         pytest.skip("Benchmark PDBQT assets not found.")
@@ -44,7 +44,7 @@ def test_app_worker_vina_e2e_true():
         f"/api/projects/{proj_id}/molecules/import",
         json={
             "dataset_name": "Native docking integration fixture",
-            "molecules": [{"id": molecule_id, "name": "Synthetic Erlotinib Fixture", "smiles": "CCO"}],
+            "molecules": [{"id": molecule_id, "name": "Synthetic fixture record B", "smiles": "CCO"}],
         },
     )
     assert ds_res.status_code == 200
@@ -77,10 +77,16 @@ def test_app_worker_vina_e2e_true():
     assert data["metrics"]["tool"] == "AutoDock Vina"
     assert data["metrics"]["tool_version"] == vina_capability["version"]
     assert data["metrics"]["vina_binary_sha256"] == vina_capability["binary_sha256"]
+    assert data["metrics"]["vina_binary_sha256"] == data["metrics"]["vina_expected_binary_sha256"]
+    assert data["metrics"]["vina_binary_digest_verified"] is True
+    assert data["metrics"]["vina_path_verified"] is True
+    assert data["metrics"]["vina_package_metadata_verified"] is True
     assert data["metrics"]["vina_version_output_sha256"] == vina_capability["version_output_sha256"]
     assert data["metrics"]["stdout_sha256"]
     assert data["metrics"]["output_pdbqt_hashes"]
     assert data["metrics"]["reproducibility_hash"]
+    assert data["metrics"]["prepared_ligand_attestations"][0]["prepared_ligand_id"] == molecule_id
+    assert data["metrics"]["prepared_ligand_attestations"][0]["ligand_output_integrity"]["verified"] is True
     assert data["metrics"]["is_native_vina_executed"] is True
 
     # 5. Assert the database records

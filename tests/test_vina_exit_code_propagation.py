@@ -15,6 +15,11 @@ VERIFIED_VINA = {
     "production_ready": True,
     "identity_verified": True,
     "binary_sha256": "a" * 64,
+    "expected_binary_sha256": "a" * 64,
+    "binary_digest_verified": True,
+    "path_verified": True,
+    "package_metadata_verified": True,
+    "expected_path": "/usr/bin/vina",
     "version_output_sha256": "b" * 64,
 }
 
@@ -27,7 +32,12 @@ def _completed_process(args, stdout=vina_service.VINA_STANDARD_LOG_FIXTURE, retu
             for line in config_path.read_text(encoding="utf-8").splitlines()
             if line.startswith("out =")
         )
-        out_path.write_text(vina_service.ERLOTINIB_LIGAND_PDBQT, encoding="utf-8")
+        pose_count = max(1, len(vina_service.parse_vina_log_output(stdout)))
+        output = "\n".join(
+            f"MODEL {index}\n{vina_service.SYNTHETIC_LIGAND_FIXTURE_B_PDBQT}\nENDMDL"
+            for index in range(1, pose_count + 1)
+        )
+        out_path.write_text(output, encoding="utf-8")
     return SimpleNamespace(returncode=returncode, stdout=stdout, stderr="" if returncode == 0 else "native failure")
 
 
@@ -36,7 +46,7 @@ def _request(ligand_count=1):
         {
             "id": f"LIG-{index + 1}",
             "name": f"Ligand {index + 1}",
-            "pdbqt": vina_service.ERLOTINIB_LIGAND_PDBQT,
+            "pdbqt": vina_service.SYNTHETIC_LIGAND_FIXTURE_B_PDBQT,
         }
         for index in range(ligand_count)
     ]
@@ -154,6 +164,12 @@ def test_job_managers_propagate_docking_exit_code(monkeypatch, tmp_path, service
                     "docking_score": -7.5,
                     "best_affinity_kcal_mol": -7.5,
                     "result_origin": "COMPUTED",
+                    "vina_binary_digest_verified": True,
+                    "vina_path_verified": True,
+                    "vina_package_metadata_verified": True,
+                    "output_created_after_start": True,
+                    "output_path_verified": True,
+                    "ligand_output_integrity": {"verified": True},
                 }
             ],
             [],
@@ -163,6 +179,10 @@ def test_job_managers_propagate_docking_exit_code(monkeypatch, tmp_path, service
                 "tool": "AutoDock Vina", "tool_version": "AutoDock Vina test",
                 "production_ready": True, "vina_identity_verified": True,
                 "vina_binary_sha256": "a" * 64,
+                "vina_expected_binary_sha256": "a" * 64,
+                "vina_binary_digest_verified": True,
+                "vina_path_verified": True,
+                "vina_package_metadata_verified": True,
             },
         ),
     )

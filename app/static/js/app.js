@@ -1,5 +1,5 @@
 /**
- * AIDD Lab OS - Production Scientific Workspace Client
+ * AIDD Lab OS - Scientific Workspace Client
  * Core State Management, Router, and UI Controller
  */
 
@@ -379,7 +379,7 @@ const AIDD = {
       <div class="flex items-center justify-between mb-4">
         <div>
           <h1 style="font-size: 20px; font-weight: 700;">Research Workspace Dashboard</h1>
-          <p style="color: var(--text-secondary); font-size: 13px;">AIDD Lab OS — Provenance-Tracking & Validated Computational Drug Discovery</p>
+          <p style="color: var(--text-secondary); font-size: 13px;">AIDD Lab OS — Provenance-Tracking & Auditable Computational Drug Discovery</p>
         </div>
         <div class="flex gap-2">
           <button class="btn btn-secondary" onclick="AIDD.openAuditModal()">🔬 Scientific Regression Audit</button>
@@ -395,12 +395,12 @@ const AIDD = {
           <div class="metric-subtext">Structure & Ligand Campaigns</div>
         </div>
         <div class="metric-card">
-          <div class="metric-label">Validated Compounds</div>
+          <div class="metric-label">Processed Compounds</div>
           <div class="metric-value">${totalMols}</div>
           <div class="metric-subtext">Standardized with SHA-256</div>
         </div>
         <div class="metric-card">
-          <div class="metric-label">Immutable Experiments</div>
+          <div class="metric-label">Locked Scientific Records</div>
           <div class="metric-value">${totalExps}</div>
           <div class="metric-subtext">Manifests & Environment captured</div>
         </div>
@@ -1195,7 +1195,7 @@ const AIDD = {
       <div class="flex items-center justify-between mb-4">
         <div>
           <h1 style="font-size: 20px; font-weight: 700;">Experiment Run History</h1>
-          <p style="color: var(--text-secondary); font-size: 13px;">Locked & immutable experiment logs with execution manifests and reproduction checks</p>
+          <p style="color: var(--text-secondary); font-size: 13px;">Database-locked scientific fields with appendable notes and reproduction checks</p>
         </div>
         <button class="btn btn-primary" onclick="AIDD.openNewExperimentModal('${proj.id}')">+ New Experiment</button>
       </div>
@@ -1273,7 +1273,7 @@ const AIDD = {
       body: `
         <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px; border-bottom: 1px solid var(--border-subtle); padding-bottom: 12px;">
           <div style="display: flex; gap: 10px; align-items: center;">
-            <span class="badge badge-locked">🔒 Immutable Record</span>
+            <span class="badge badge-locked">🔒 Scientific Fields Locked</span>
             <div><b>Stage:</b> <span class="badge badge-active">${exp.stage}</span></div>
             <div><b>Tool:</b> <code>${exp.tool} — ${exp.tool_version}</code></div>
             <div><b>Status:</b> <span class="badge badge-${exp.status}">${exp.status}</span></div>
@@ -1352,7 +1352,7 @@ const AIDD = {
     const res = await this.api(`/api/experiments/${expId}/reproduce`, { method: 'POST' });
     this.closeModal();
     if (res.reproduction_match) {
-      this.showToast(`Reproduction succeeded! Output metrics match 100% (New Exp: ${res.reproduced_experiment_id})`, 'success');
+      this.showToast(`Reproduction matched the defined content checks (New Exp: ${res.reproduced_experiment_id})`, 'success');
     } else {
       this.showToast(`Reproduction diverged: ${res.diff_reasons.join(', ')}`, 'error');
     }
@@ -1646,7 +1646,7 @@ const AIDD = {
       <div class="flex items-center justify-between mb-4">
         <div>
           <h1 style="font-size: 20px; font-weight: 700;">Reproducibility Research Report</h1>
-          <p style="color: var(--text-secondary); font-size: 13px;">Full verifiable audit report generated directly from immutable provenance records</p>
+          <p style="color: var(--text-secondary); font-size: 13px;">Audit report generated from persisted provenance records and stored hashes</p>
         </div>
         <div class="flex gap-2">
           <button class="btn btn-secondary" onclick="window.open('/api/projects/${proj.id}/reproducibility-bundle')">📦 Download ZIP Bundle</button>
@@ -1678,9 +1678,9 @@ const AIDD = {
 
         <div class="metric-grid" style="margin-bottom: 16px;">
           <div class="metric-card">
-            <div class="metric-label">Benchmark Result</div>
+            <div class="metric-label">Regression Check Result</div>
             <div class="metric-value" style="color: ${audit.all_passed ? '#10B981' : '#EF4444'};">
-              ${audit.all_passed ? '100% PASSED' : 'FAILURES DETECTED'}
+              ${audit.all_passed ? 'ALL DEFINED CHECKS PASSED' : 'FAILURES DETECTED'}
             </div>
             <div class="metric-subtext">${audit.passed_count} / ${audit.compounds_tested} reference standards verified</div>
           </div>

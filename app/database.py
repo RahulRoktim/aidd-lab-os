@@ -9,7 +9,8 @@ import os
 import json
 from contextlib import contextmanager
 
-DB_PATH = os.environ.get('AIDD_DB_PATH', '/tmp/aidd_lab.db')
+_default_data_dir = '/data' if os.path.isdir('/data') else os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'data'))
+DB_PATH = os.environ.get('AIDD_DB_PATH', os.path.join(_default_data_dir, 'aidd_lab.db'))
 
 SCHEMA_SQL = """
 PRAGMA foreign_keys = ON;
@@ -295,10 +296,34 @@ CREATE INDEX IF NOT EXISTS idx_candidate_scores_project ON candidate_scores(proj
 CREATE INDEX IF NOT EXISTS idx_decision_logs_project ON decision_logs(project_id);
 CREATE INDEX IF NOT EXISTS idx_provenance_project ON provenance_edges(project_id);
 CREATE INDEX IF NOT EXISTS idx_failures_experiment ON experiment_failures(experiment_id);
+
+CREATE TRIGGER IF NOT EXISTS prevent_locked_experiment_scientific_update
+BEFORE UPDATE OF
+    id, project_id, name, experiment_type, status, stage,
+    input_dataset_id, output_dataset_id, tool, tool_version,
+    started_at, completed_at, duration_seconds,
+    molecules_in, molecules_out, molecules_failed, is_locked,
+    environment_info, parameters, metrics, logs, warnings, notes,
+    reproducibility_manifest, created_at
+ON experiments
+WHEN OLD.is_locked = 1
+BEGIN
+    SELECT RAISE(ABORT, 'locked experiment scientific fields are immutable');
+END;
+
+CREATE TRIGGER IF NOT EXISTS prevent_locked_experiment_delete
+BEFORE DELETE ON experiments
+WHEN OLD.is_locked = 1
+BEGIN
+    SELECT RAISE(ABORT, 'locked experiments cannot be deleted');
+END;
 """
 
 
 def get_db_connection():
+    parent = os.path.dirname(os.path.abspath(DB_PATH))
+    if parent:
+        os.makedirs(parent, exist_ok=True)
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON;")

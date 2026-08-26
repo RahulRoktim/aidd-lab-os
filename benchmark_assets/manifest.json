@@ -21,9 +21,9 @@
     },
     {
       "fixture_name": "Synthetic receptor/ligand plumbing fixture B",
-      "reference_label_only": "4WKQ/erlotinib-inspired coordinates; not a PDB-derived structure",
+      "reference_label_only": "Small synthetic coordinates; not a named drug or PDB-derived structure",
       "receptor_file": "synthetic_4wkq_receptor_fixture.pdbqt",
-      "ligand_file": "synthetic_erlotinib_ligand_fixture.pdbqt",
+      "ligand_file": "synthetic_ligand_fixture_b.pdbqt",
       "fixture_search_box": {
         "center_x": 22.4,
         "center_y": 0.8,

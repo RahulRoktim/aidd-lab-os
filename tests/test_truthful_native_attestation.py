@@ -20,7 +20,7 @@ def _native_request():
         ligands=[{
             "id": "LIG-1",
             "name": "Synthetic ligand fixture",
-            "pdbqt": vina_service.ERLOTINIB_LIGAND_PDBQT,
+            "pdbqt": vina_service.SYNTHETIC_LIGAND_FIXTURE_B_PDBQT,
         }],
         search_box=SearchBoxConfig(
             center_x=22.4, center_y=0.8, center_z=52.5,
@@ -38,6 +38,11 @@ def _verified_vina():
         "production_ready": True,
         "identity_verified": True,
         "binary_sha256": "a" * 64,
+        "expected_binary_sha256": "a" * 64,
+        "binary_digest_verified": True,
+        "path_verified": True,
+        "package_metadata_verified": True,
+        "expected_path": "/usr/bin/vina",
         "version_output_sha256": "b" * 64,
     }
 
@@ -49,17 +54,30 @@ def test_fake_named_vina_printing_table_and_zero_exit_is_rejected(monkeypatch):
 
     detected = capability_service.detect_vina()
 
-    assert detected["installed"] is False
+    assert detected["installed"] is True
     assert detected["identity_verified"] is False
     assert detected["production_ready"] is False
-    assert detected["version_probe_exit_code"] == 0
+    assert detected["binary_digest_verified"] is False
+    assert detected["version_probe_exit_code"] is None
     assert detected["version"] is None
 
 
 def test_valid_vina_identity_preserves_exact_version_and_binary_hash(monkeypatch, tmp_path):
     binary = tmp_path / "vina"
     binary.write_bytes(b"real-binary-test-bytes")
+    digest = capability_service.hashlib.sha256(binary.read_bytes()).hexdigest()
+    monkeypatch.setattr(config, "VINA_EXECUTABLE", str(binary))
+    monkeypatch.setattr(config, "RELEASE_ATTESTATION", {
+        **config.RELEASE_ATTESTATION,
+        "vina": {
+            **config.RELEASE_ATTESTATION["vina"],
+            "expected_path": str(binary),
+            "expected_binary_sha256": digest,
+            "expected_version": "AutoDock Vina v9.8.7-custom+build42",
+        },
+    })
     monkeypatch.setattr(capability_service.shutil, "which", lambda _: str(binary))
+    monkeypatch.setattr(capability_service, "_verify_conda_package", lambda _: {"verified": True, "record_path": "test", "actual": {}})
     monkeypatch.setattr(
         capability_service.subprocess,
         "run",
@@ -75,7 +93,8 @@ def test_valid_vina_identity_preserves_exact_version_and_binary_hash(monkeypatch
     assert detected["installed"] is True
     assert detected["identity_verified"] is True
     assert detected["version"] == "AutoDock Vina v9.8.7-custom+build42"
-    assert detected["binary_sha256"] == capability_service.hashlib.sha256(binary.read_bytes()).hexdigest()
+    assert detected["binary_sha256"] == digest
+    assert detected["binary_sha256"] == detected["expected_binary_sha256"]
 
 
 def test_zero_exit_without_output_pdbqt_is_not_native_success(monkeypatch, tmp_path):

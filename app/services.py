@@ -36,7 +36,14 @@ def compute_sha256(data: str or bytes) -> str:
 def get_system_environment_info() -> dict:
     engine_status = ScientificEngine.get_engine_status()
     worker_st = worker_client.get_worker_status()
-    has_native_rdk = engine_status["has_rdkit"] or (worker_st["connected"] and worker_st.get("scientific_software", {}).get("rdkit", {}).get("installed", False))
+    worker_rdkit = worker_st.get("scientific_software", {}).get("rdkit", {})
+    has_native_rdk = engine_status["has_rdkit"] or bool(
+        worker_st["connected"]
+        and worker_rdkit.get("installed")
+        and worker_rdkit.get("production_ready")
+        and worker_rdkit.get("known_answer_verified")
+        and worker_rdkit.get("native_components_verified")
+    )
     vina_capability = worker_st.get("scientific_software", {}).get("autodock_vina", {})
     has_native_vina = bool(
         worker_st["connected"]
@@ -765,9 +772,16 @@ def import_or_run_docking(project_id: str,
     exit_code = None
     worker_error = None
     vina_binary_sha256 = None
+    vina_expected_binary_sha256 = None
+    vina_binary_digest_verified = False
+    vina_path = None
+    vina_expected_path = None
+    vina_path_verified = False
+    vina_package_metadata_verified = False
     vina_version_output_sha256 = None
     stdout_sha256 = None
     output_pdbqt_hashes = []
+    prepared_ligand_attestations = []
 
     if result_origin == "IMPORTED":
         actual_tool = docking_tool or "Imported docking data"
@@ -787,6 +801,16 @@ def import_or_run_docking(project_id: str,
         from app.worker_client import submit_docking_job
         if not receptor_pdbqt or not prepared_ligands:
             raise ValueError("Native execution requires explicit receptor_pdbqt and prepared_ligands in the request.")
+        dataset_molecule_ids = {m["id"] for m in in_ds["molecules"]}
+        prepared_ids = [ligand.get("id") for ligand in prepared_ligands if isinstance(ligand, dict)]
+        if len(prepared_ids) != len(prepared_ligands) or len(set(prepared_ids)) != len(prepared_ids):
+            raise ValueError("Each prepared ligand requires one unique explicit ID")
+        if set(prepared_ids) != dataset_molecule_ids:
+            missing = sorted(dataset_molecule_ids - set(prepared_ids))
+            unknown = sorted(set(prepared_ids) - dataset_molecule_ids)
+            raise ValueError(
+                f"Prepared ligand IDs must exactly match the input dataset; missing={missing}, unknown={unknown}"
+            )
 
         search_box = {
             "center_x": center_x,
@@ -809,6 +833,12 @@ def import_or_run_docking(project_id: str,
 
         worker_metrics = worker_res.get("metrics", {}) if isinstance(worker_res, dict) else {}
         worker_results = worker_res.get("results", []) if isinstance(worker_res, dict) else []
+        worker_prepared_attestations = worker_metrics.get("prepared_ligand_attestations") or []
+        prepared_attestation_by_id = {
+            attestation.get("prepared_ligand_id"): attestation
+            for attestation in worker_prepared_attestations
+            if isinstance(attestation, dict) and attestation.get("prepared_ligand_id")
+        }
         strict_native_success = bool(
             succ
             and isinstance(worker_res, dict)
@@ -821,8 +851,15 @@ def import_or_run_docking(project_id: str,
             and worker_res.get("tool_version", "").lower().startswith("autodock vina")
             and worker_metrics.get("vina_identity_verified") is True
             and worker_metrics.get("vina_binary_sha256")
+            and worker_metrics.get("vina_expected_binary_sha256")
+            and worker_metrics.get("vina_binary_sha256") == worker_metrics.get("vina_expected_binary_sha256")
+            and worker_metrics.get("vina_binary_digest_verified") is True
+            and worker_metrics.get("vina_path") == worker_metrics.get("vina_expected_path")
+            and worker_metrics.get("vina_path_verified") is True
+            and worker_metrics.get("vina_package_metadata_verified") is True
             and worker_metrics.get("stdout_sha256")
             and worker_metrics.get("output_pdbqt_hashes")
+            and len(prepared_attestation_by_id) == len(worker_prepared_attestations)
             and worker_res.get("worker_id")
             and worker_res.get("reproducibility_hash")
             and worker_results
@@ -837,9 +874,23 @@ def import_or_run_docking(project_id: str,
                 and r.get("tool") == worker_res.get("tool")
                 and r.get("tool_version") == worker_res.get("tool_version")
                 and r.get("vina_binary_sha256") == worker_metrics.get("vina_binary_sha256")
+                and r.get("vina_expected_binary_sha256") == worker_metrics.get("vina_expected_binary_sha256")
+                and r.get("vina_binary_digest_verified") is True
+                and r.get("vina_path_verified") is True
+                and r.get("vina_package_metadata_verified") is True
+                and r.get("output_created_after_start") is True
+                and r.get("output_path_verified") is True
+                and r.get("ligand_output_integrity", {}).get("verified") is True
+                and r.get("prepared_ligand_id") == r.get("molecule_id")
+                and r.get("molecule_id") in dataset_molecule_ids
                 and r.get("output_pdbqt_hash") in worker_metrics.get("output_pdbqt_hashes", [])
+                and prepared_attestation_by_id.get(r.get("molecule_id"), {}).get("ligand_hash") == r.get("ligand_hash")
+                and prepared_attestation_by_id.get(r.get("molecule_id"), {}).get("output_pdbqt_hash") == r.get("output_pdbqt_hash")
+                and prepared_attestation_by_id.get(r.get("molecule_id"), {}).get("ligand_output_integrity", {}).get("verified") is True
                 for r in worker_results
             )
+            and {r.get("molecule_id") for r in worker_results} == dataset_molecule_ids
+            and set(prepared_attestation_by_id) == dataset_molecule_ids
         )
 
         if strict_native_success:
@@ -852,9 +903,16 @@ def import_or_run_docking(project_id: str,
             actual_tool = worker_res["tool"]
             actual_tool_version = worker_res["tool_version"]
             vina_binary_sha256 = worker_metrics.get("vina_binary_sha256")
+            vina_expected_binary_sha256 = worker_metrics.get("vina_expected_binary_sha256")
+            vina_binary_digest_verified = worker_metrics.get("vina_binary_digest_verified", False)
+            vina_path = worker_metrics.get("vina_path")
+            vina_expected_path = worker_metrics.get("vina_expected_path")
+            vina_path_verified = worker_metrics.get("vina_path_verified", False)
+            vina_package_metadata_verified = worker_metrics.get("vina_package_metadata_verified", False)
             vina_version_output_sha256 = worker_metrics.get("vina_version_output_sha256")
             stdout_sha256 = worker_metrics.get("stdout_sha256")
             output_pdbqt_hashes = worker_metrics.get("output_pdbqt_hashes") or []
+            prepared_ligand_attestations = worker_metrics.get("prepared_ligand_attestations") or []
 
             for result in worker_results:
                 m_id = result.get("molecule_id")
@@ -869,6 +927,9 @@ def import_or_run_docking(project_id: str,
                         "output_pdbqt_hash": result.get("output_pdbqt_hash"),
                         "stdout_sha256": result.get("stdout_sha256"),
                         "config_sha256": result.get("config_sha256"),
+                        "prepared_ligand_id": result.get("prepared_ligand_id"),
+                        "prepared_ligand_name": result.get("prepared_ligand_name"),
+                        "ligand_output_integrity": result.get("ligand_output_integrity"),
                     }
         else:
             exit_code = worker_res.get("exit_code") if isinstance(worker_res, dict) else None
@@ -926,13 +987,13 @@ def import_or_run_docking(project_id: str,
             "scores": {key: value["score"] for key, value in sorted(docking_data.items())},
         }, sort_keys=True))
 
+    duration = round(time.time() - start_time, 2)
+    final_status = 'completed' if worker_error is None and docking_data else 'failed'
+    best_score = min((value["score"] for value in docking_data.values()), default=None) if final_status == "completed" else None
+
     # Process molecules
     conn = get_db_connection()
     c = conn.cursor()
-    best_score = 999.0
-
-    duration = round(time.time() - start_time, 2)
-    final_status = 'completed' if worker_error is None and docking_data else 'failed'
 
     metrics = {
         "molecules_docked": len(docking_data),
@@ -948,10 +1009,19 @@ def import_or_run_docking(project_id: str,
         "tool": actual_tool,
         "tool_version": actual_tool_version,
         "vina_binary_sha256": vina_binary_sha256,
+        "vina_expected_binary_sha256": vina_expected_binary_sha256,
+        "vina_binary_digest_verified": vina_binary_digest_verified,
+        "vina_path": vina_path,
+        "vina_expected_path": vina_expected_path,
+        "vina_path_verified": vina_path_verified,
+        "vina_package_metadata_verified": vina_package_metadata_verified,
         "vina_version_output_sha256": vina_version_output_sha256,
         "stdout_sha256": stdout_sha256,
         "output_pdbqt_hashes": output_pdbqt_hashes,
+        "prepared_ligand_attestations": prepared_ligand_attestations,
         "reproducibility_hash": reproducibility_hash,
+        "best_docking_score": best_score,
+        "exit_code": exit_code,
         "error": str(worker_error) if worker_error else None
     }
 
@@ -1019,22 +1089,11 @@ def import_or_run_docking(project_id: str,
             actual_lig_hash = data.get("ligand_hash") or compute_sha256(m.get("smiles", ""))
             actual_poses_count = data.get("poses_count")
 
-            best_score = min(best_score, score)
-
             c.execute('''INSERT INTO docking_results
                          (id, project_id, molecule_id, experiment_id, docking_score, result_origin, receptor, docking_tool, pose_identifier, binding_site_coords, center_x, center_y, center_z, size_x, size_y, size_z, exhaustiveness, seed, vina_version, receptor_file_hash, ligand_file_hash, rmsd_lower_bound, rmsd_upper_bound, created_at)
                          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
                       (gen_id("res"), project_id, m_id, exp_id, score, result_origin, receptor, actual_tool,
                        f"pose_best_of_{actual_poses_count}" if actual_poses_count else None, None, center_x, center_y, center_z, size_x, size_y, size_z, exhaustiveness, seed, actual_tool_version, actual_rec_hash, actual_lig_hash, None, None, now_iso()))
-
-    if best_score == 999.0:
-         best_score = None
-
-    metrics["best_docking_score"] = best_score
-    metrics["exit_code"] = exit_code
-
-    # Update experiments again with best_score
-    c.execute("UPDATE experiments SET metrics = ? WHERE id = ?", (json.dumps(metrics), exp_id))
 
     c.execute('''INSERT INTO provenance_edges (id, project_id, source_id, source_type, target_id, target_type, relation_type, metadata_json, created_at)
                  VALUES (?, ?, ?, 'dataset', ?, 'experiment', 'wasUsedBy', ?, ?)''',
@@ -1187,7 +1246,7 @@ def import_or_run_admet(project_id: str,
             """
             INSERT INTO experiments
             (id, project_id, name, experiment_type, status, stage, input_dataset_id, output_dataset_id, tool, tool_version, started_at, completed_at, duration_seconds, molecules_in, molecules_out, molecules_failed, is_locked, reproduction_of_id, reproduction_match, environment_info, parameters, metrics, logs, warnings, notes, notes_log, reproducibility_manifest, created_at)
-            VALUES (?, ?, ?, 'admet', 'completed', 'ADMET', ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 1, NULL, NULL, ?, ?, ?, ?, '', ?, '[]', '', ?)
+            VALUES (?, ?, ?, 'admet', 'completed', 'ADMET', ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, NULL, NULL, ?, ?, ?, ?, '', ?, '[]', '', ?)
             """,
             (
                 exp_id, project_id, experiment_name, input_dataset_id, out_ds_id,
@@ -1264,7 +1323,7 @@ def import_or_run_admet(project_id: str,
 
         metrics["high_gi_absorption_rate"] = round((high_gi_count / len(in_ds["molecules"])) * 100.0, 1) if in_ds["molecules"] else 0.0
         metrics["low_admet_risk_count"] = low_risk_count
-        conn.execute("UPDATE experiments SET metrics = ? WHERE id = ?", (json.dumps(metrics), exp_id))
+        conn.execute("UPDATE experiments SET metrics = ?, is_locked = 1 WHERE id = ?", (json.dumps(metrics), exp_id))
 
         conn.execute(
             """
@@ -1771,6 +1830,7 @@ def generate_experiment_manifest(experiment_id: str) -> dict:
             "stage": exp["stage"],
             "status": exp["status"],
             "is_immutable_locked": bool(exp["is_locked"]),
+            "lock_scope": "Scientific experiment fields are protected by a database trigger after locking; notes and reproduction linkage remain appendable.",
             "started_at": exp["started_at"],
             "completed_at": exp["completed_at"],
             "duration_seconds": exp["duration_seconds"],
