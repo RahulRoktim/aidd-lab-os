@@ -38,3 +38,8 @@ Thumbs.db
 
 # Conda
 .conda/
+
+# Audit run outputs and worktree snapshots (regenerated per audit, never source)
+AUDIT_*.html
+_audit*.tar.gz
+_audit*.diff
