@@ -10,7 +10,7 @@ import json
 WORKER_VERSION = "1.4.0"
 API_VERSION = "v1"
 WORKER_ID = os.environ.get("AIDD_WORKER_ID", f"worker_{socket.gethostname()}_{uuid.uuid4().hex[:6]}")
-HOST = os.environ.get("AIDD_WORKER_HOST", "0.0.0.0")
+HOST = os.environ.get("AIDD_WORKER_HOST", "127.0.0.1")
 PORT = int(os.environ.get("AIDD_WORKER_PORT", "8001"))
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -41,5 +41,10 @@ MAX_CONCURRENT_JOBS = int(os.environ.get("MAX_CONCURRENT_JOBS", "2"))
 MAX_DOCKING_TIMEOUT_SECONDS = int(os.environ.get("MAX_DOCKING_TIMEOUT", "600"))
 MAX_LIGAND_COUNT_PER_BATCH = int(os.environ.get("MAX_LIGAND_BATCH", "2500"))
 MAX_UPLOAD_SIZE_BYTES = int(os.environ.get("MAX_UPLOAD_SIZE_BYTES", str(25 * 1024 * 1024))) # 25MB
+
+if not 1 <= MAX_CONCURRENT_JOBS <= 8:
+    raise ValueError('MAX_CONCURRENT_JOBS must be between 1 and 8')
+if min(MAX_DOCKING_TIMEOUT_SECONDS, MAX_LIGAND_COUNT_PER_BATCH, MAX_UPLOAD_SIZE_BYTES) <= 0:
+    raise ValueError('Worker limits must be positive')
 
 ALLOWED_JOB_TYPES = ["descriptors", "standardize", "docking", "fingerprint"]

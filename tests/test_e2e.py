@@ -8,7 +8,6 @@ import os
 import json
 
 # Setup Python path
-sys.path.insert(0, '/working_dir/c_1ed089c83162bf3c/aidd_lab_os')
 
 from app.database import init_db, get_db
 from app import services

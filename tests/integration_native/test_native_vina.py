@@ -7,7 +7,6 @@ Skips cleanly if AutoDock Vina binary is not installed on host.
 import sys
 import pytest
 
-sys.path.insert(0, '/working_dir/c_1ed089c83162bf3c/aidd_lab_os')
 
 from aidd_worker.services.capability_service import detect_vina
 from aidd_worker.models import DockingJobRequest, SearchBoxConfig

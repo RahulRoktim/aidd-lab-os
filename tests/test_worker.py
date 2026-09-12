@@ -10,7 +10,6 @@ import json
 import urllib.request
 import urllib.error
 
-sys.path.insert(0, '/working_dir/c_1ed089c83162bf3c/aidd_lab_os')
 
 from aidd_worker.services import capability_service, environment_service, rdkit_service, vina_service, job_service
 from aidd_worker.models import (

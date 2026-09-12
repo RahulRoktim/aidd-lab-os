@@ -2,6 +2,7 @@ import os
 import shutil
 import sqlite3
 import subprocess
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -74,8 +75,8 @@ def output_path_from_command(args):
 
 
 def test_round2_banner_and_pdbqt_fake_is_rejected_by_release_digest(monkeypatch, tmp_path):
-    fake_fixture = Path(__file__).parent / "fixtures" / "fake_vina_round2.sh"
-    fake = tmp_path / "vina"
+    fake_fixture = Path(__file__).parent / "fixtures" / "fake_vina_round2.py"
+    fake = tmp_path / "fake_vina.py"
     shutil.copy2(fake_fixture, fake)
     os.chmod(fake, 0o755)
     ligand = tmp_path / "ligand.pdbqt"
@@ -84,15 +85,17 @@ def test_round2_banner_and_pdbqt_fake_is_rejected_by_release_digest(monkeypatch,
     ligand.write_text(vina_service.SYNTHETIC_LIGAND_FIXTURE_B_PDBQT, encoding="utf-8")
     config_file.write_text(f"ligand = {ligand}\nout = {output}\n", encoding="utf-8")
 
-    version = subprocess.run([str(fake), "--version"], capture_output=True, text=True, check=True)
-    forged = subprocess.run([str(fake), "--config", str(config_file)], capture_output=True, text=True, check=True)
+    version = subprocess.run([sys.executable, str(fake), "--version"], capture_output=True, text=True, check=True)
+    forged = subprocess.run([sys.executable, str(fake), "--config", str(config_file)], capture_output=True, text=True, check=True)
     assert version.stdout.strip() == "AutoDock Vina 36dd023-mod"
     assert "mode |   affinity" in forged.stdout
     assert output.exists() and output.stat().st_size > 0
     assert output.read_text(encoding="utf-8") != ligand.read_text(encoding="utf-8")
 
     monkeypatch.setenv("PATH", str(tmp_path) + os.pathsep + os.environ.get("PATH", ""))
-    monkeypatch.setattr(config, "VINA_EXECUTABLE", "vina")
+    monkeypatch.setattr(config, "VINA_EXECUTABLE", str(fake))
+    monkeypatch.setattr(capability_service.shutil, "which", lambda _: str(fake))
+    monkeypatch.setattr(capability_service.subprocess, "run", lambda *a, **kw: pytest.fail("Untrusted binary must not execute"))
     detected = capability_service.detect_vina()
     assert detected["installed"] is True
     assert detected["binary_sha256"] != detected["expected_binary_sha256"]

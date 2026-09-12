@@ -6,7 +6,7 @@ services:
     container_name: aidd-scientific-worker
     restart: unless-stopped
     ports:
-      - "8001:8001"
+      - "127.0.0.1:8001:8001"
     environment:
       - AIDD_WORKER_PORT=8001
       - AIDD_WORKER_HOST=0.0.0.0
@@ -36,7 +36,7 @@ services:
     container_name: aidd-lab-os-app
     restart: unless-stopped
     ports:
-      - "8000:8000"
+      - "127.0.0.1:8000:8000"
     environment:
       - AIDD_DB_PATH=/data/aidd_lab.db
       - AIDD_WORKER_URL=http://aidd-worker:8001

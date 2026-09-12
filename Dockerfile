@@ -2,7 +2,8 @@ FROM python:3.11-slim
 
 WORKDIR /app
 
-RUN pip install --no-cache-dir fastapi uvicorn pydantic requests
+COPY requirements-app.txt ./requirements-app.txt
+RUN pip install --no-cache-dir -r requirements-app.txt
 
 COPY . .
 

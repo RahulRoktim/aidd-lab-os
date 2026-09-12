@@ -6,7 +6,6 @@ Executes directly through native RDKit C++ binaries. Skips cleanly if RDKit is n
 import sys
 import pytest
 
-sys.path.insert(0, '/working_dir/c_1ed089c83162bf3c/aidd_lab_os')
 
 from aidd_worker.services.capability_service import detect_rdkit
 from aidd_worker.services.rdkit_service import calculate_descriptors_batch, MoleculeInput
@@ -15,6 +14,9 @@ def test_native_rdkit_calculation():
     rdk_info = detect_rdkit()
     if not rdk_info["installed"]:
         pytest.skip("SKIPPED — NATIVE DEPENDENCY UNAVAILABLE (RDKit not installed in host environment)")
+
+    if not rdk_info.get("production_ready"):
+        pytest.skip("SKIPPED_UNATTESTED_DEPENDENCY: installed RDKit does not match the supported release environment")
 
     # Execute through real native RDKit
     molecules = [

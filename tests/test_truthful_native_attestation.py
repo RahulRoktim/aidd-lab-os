@@ -51,6 +51,8 @@ def test_fake_named_vina_printing_table_and_zero_exit_is_rejected(monkeypatch):
     fake_path = Path(__file__).parent / "fixtures" / "fake_vina.sh"
     os.chmod(fake_path, 0o755)
     monkeypatch.setattr(config, "VINA_EXECUTABLE", str(fake_path))
+    monkeypatch.setattr(capability_service.shutil, "which", lambda _: str(fake_path))
+    monkeypatch.setattr(capability_service.subprocess, "run", lambda *a, **kw: pytest.fail("Untrusted binary must not execute"))
 
     detected = capability_service.detect_vina()
 

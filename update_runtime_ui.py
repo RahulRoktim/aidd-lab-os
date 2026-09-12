@@ -1,3 +1,5 @@
+raise RuntimeError('ARCHIVED GENERATOR: unsupported historical utility; would overwrite active source using a stale absolute path. Read only.')
+
 with open('/working_dir/c_1ed089c83162bf3c/aidd_lab_os/app/static/js/app.js', 'r') as f:
     code = f.read()
 

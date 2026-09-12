@@ -1,0 +1,17 @@
+# Current engineering status
+
+Authoritative engineering status for 2026-09-11/12. This remains local research infrastructure. Historical native attestation reports describe their exact earlier runtime and do not attest this Windows host. No current NATIVE_RUNTIME_VERIFIED claim is made here.
+
+The active HTTP worker now enforces bounded in-process execution, offloads synchronous work so status/cancel routes remain responsive, persists RUNNING before work, and atomically publishes manifests/artifacts. Single-process startup reloads durable history and marks interrupted jobs failed, preserving diagnostic evidence. Corrupt or orphaned job storage stops startup with an explicit preserved-evidence error. There is no automatic resume or silent deletion.
+
+Cancellation is cooperative: RUNNING plus cancel_requested remains visible until the underlying computation returns or reaches its existing timeout. Only then is the result CANCELLED; results cannot be published as completed. Failed/cancelled artifacts remain local diagnostics. Downloads require a completed job and matching recorded artifact digest. This does not provide authentication against a privileged party changing both file and manifest.
+
+Native RDKit requests without release attestation fail without simulated substitution. Partial descriptor/standardization batches are failed with retained record-level diagnostics. Explicit demo results remain SIMULATED/DEMO, never native validation. Seed 0 is retained in execution/configuration provenance. Original strict Vina binary/path/package gates remain unchanged.
+
+Validation: 50 tests passed and three native integration tests skipped. Thirteen new lifecycle/security/outcome regressions cover recovery, corruption, atomic publication failure, cancellation, capacity, host/origin, body limits, artifact tamper, clean app startup, unattested native requests, partial batches and zero seed. Two former failures were POSIX-only impostor fixtures: portable tests retain digest-gate rejection and assert untrusted binaries are not executed. The installed-but-unattested native RDKit test now skips explicitly; that is not a native pass. A fresh dependency environment passed pip check and 47 tests with three skips before the final three outcome regressions were added.
+
+Actual local HTTP app/worker startup, explicit demo descriptor/standardization jobs, artifact retrieval, rejected unattested native request, worker restart with persisted history, and a stopped scratch SQLite backup/restore passed. Compose configuration parsed successfully. Docker runtime remains BLOCKED: the Linux daemon pipe is unavailable. Release attestation metadata and historical scientific evidence were not changed.
+
+Both services are local-only and unauthenticated. Host/origin restrictions and loopback Compose publications reduce browser/network exposure; they are not hosted access control. App import no longer creates/seeds an operator database. Demo seeding requires explicit AIDD_SEED_DEMO=1. Five obsolete source generators now refuse execution/import; their historical code remains intact below guards. The old manual test runner is preserved as a text archive and replaced by a portable pytest entry point.
+
+One worker process only; no durable distributed queue, forced cancellation, power-loss/fsync guarantee across all OS storage layers, production authentication, or qualified scientific workflow. A supported native Linux container run and actual lab acceptance remain P1 gates. See [supported environment](SUPPORTED_ENVIRONMENT.md).

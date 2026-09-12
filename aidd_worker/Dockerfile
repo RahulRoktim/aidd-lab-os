@@ -37,10 +37,11 @@ RUN mkdir -p /data/jobs /data/artifacts
 
 COPY aidd_worker/ ./aidd_worker/
 COPY app/ ./app/
+COPY local_boundary.py ./local_boundary.py
 
 EXPOSE 8001
 
 HEALTHCHECK --interval=15s --timeout=5s --start-period=5s --retries=3 \
-  CMD curl -f http://127.0.0.1:8001/health || exit 1
+  CMD python3 -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8001/health')"
 
 ENTRYPOINT ["python3", "-m", "uvicorn", "aidd_worker.main:app", "--host", "0.0.0.0", "--port", "8001"]

@@ -348,7 +348,7 @@ def execute_docking_job(job_id: str, request: DockingJobRequest) -> Tuple[List[D
             f"exhaustiveness = {request.exhaustiveness or 16}",
             f"num_modes = {request.num_modes or 9}",
             f"energy_range = {request.energy_range or 3.0}",
-            f"seed = {request.seed or 42}",
+            f"seed = {request.seed if request.seed is not None else 42}",
             f"out = {out_pdbqt_path}",
         ]
         config_text = "\n".join(config_lines) + "\n"
@@ -616,7 +616,7 @@ def execute_docking_job(job_id: str, request: DockingJobRequest) -> Tuple[List[D
         "duration_seconds": duration,
         "search_box": sb.dict(),
         "exhaustiveness": request.exhaustiveness or 16,
-        "seed": request.seed or 42,
+        "seed": request.seed if request.seed is not None else 42,
         "exit_code": aggregate_exit_code
     }
     reproducibility_payload = {

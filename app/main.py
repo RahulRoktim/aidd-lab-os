@@ -1,3 +1,5 @@
+from local_boundary import install_local_boundary
+from contextlib import asynccontextmanager
 from app import worker_client
 """
 AIDD Lab OS - FastAPI Application Server
@@ -20,22 +22,20 @@ from app.database import init_db
 from app import services
 from app.scientific_engine import ScientificEngine
 
-init_db()
-services.seed_demo_project()
+@asynccontextmanager
+async def lifespan(application):
+    init_db()
+    if os.environ.get('AIDD_SEED_DEMO') == '1':
+        services.seed_demo_project()
+    yield
 
-app = FastAPI(
+app = FastAPI(lifespan=lifespan,
     title="AIDD Lab OS Scientific API",
     description="Scientific Provenance, Validation & Reproducible Workspace for Computational Drug Discovery",
     version="1.2.0"
 )
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+install_local_boundary(app)
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 STATIC_DIR = os.path.join(BASE_DIR, "static")

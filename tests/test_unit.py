@@ -6,7 +6,6 @@ Pure Python / standard library compatible tests for models, bounding box constra
 import sys
 import os
 
-sys.path.insert(0, '/working_dir/c_1ed089c83162bf3c/aidd_lab_os')
 
 from aidd_worker.models import (
     SearchBoxConfig, MoleculeInput, DescriptorJobRequest,

@@ -6,6 +6,7 @@ import os
 import io
 import hashlib
 import re
+import tempfile
 from pathlib import Path
 from typing import Dict, Any, List
 
@@ -54,11 +55,21 @@ def compute_file_sha256(file_path: str) -> str:
             h.update(chunk)
     return h.hexdigest()
 
+def atomic_write(file_path, content):
+    """Preserve the previous file if publication fails; retain pending diagnostics."""
+    data = content.encode('utf-8') if isinstance(content, str) else content
+    with tempfile.NamedTemporaryFile(mode='wb', dir=Path(file_path).parent,
+                                     prefix='.pending-', delete=False) as handle:
+        handle.write(data)
+        handle.flush()
+        os.fsync(handle.fileno())
+        pending = handle.name
+    os.replace(pending, file_path)
+
+
 def save_job_artifact(job_id: str, filename: str, content: str or bytes, file_type: str = "text") -> ArtifactInfo:
     file_path = resolve_job_path(job_id, filename, create_directory=True)
-    mode = 'wb' if isinstance(content, bytes) else 'w'
-    with open(file_path, mode, encoding=None if isinstance(content, bytes) else 'utf-8') as f:
-        f.write(content)
+    atomic_write(file_path, content)
         
     size_bytes = os.path.getsize(file_path)
     sha256 = compute_file_sha256(file_path)

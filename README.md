@@ -1,5 +1,7 @@
 # AIDD Lab OS — Artificial Intelligence Drug Discovery Lab Operating System (v1.4.0)
 
+> **Current engineering boundary:** [status dated 2026-09-11/12](ENGINEERING_STATUS_2026-09-11.md) and [supported environment](SUPPORTED_ENVIRONMENT.md) supersede older readiness/replay claims. Local research use; external scientific and production validation remain pending.
+
 **AIDD Lab OS** is a provenance-tracking computational drug discovery workspace. It separates project management, dataset versioning, decision logging, and candidate ranking from native scientific computation via a dedicated **AIDD Scientific Worker**.
 
 `NATIVE_RUNTIME_VERIFIED` has a narrow meaning: the supported runtime executed the attested native scientific-tool path, produced structurally valid outputs, persisted execution evidence and provenance, and reproduced the tested result according to the defined checks. It does not validate docking accuracy, binding prediction, efficacy, biological validity, production fitness, or security certification. Synthetic docking fixtures are plumbing tests only.

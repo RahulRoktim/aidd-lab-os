@@ -5,6 +5,7 @@ AIDD Worker - Data Schemas & Job Models (v1.4.0)
 from typing import List, Dict, Any, Optional
 from pydantic import BaseModel, Field, validator
 import re
+import math
 from enum import Enum
 
 class JobStatus(str, Enum):
@@ -63,6 +64,12 @@ class SearchBoxConfig(BaseModel):
     size_x: float = Field(default=20.0, gt=0.0)
     size_y: float = Field(default=20.0, gt=0.0)
     size_z: float = Field(default=20.0, gt=0.0)
+
+    @validator("center_x", "center_y", "center_z", "size_x", "size_y", "size_z", allow_reuse=True)
+    def finite_box(cls, value):
+        if not math.isfinite(value):
+            raise ValueError('Search box values must be finite')
+        return value
 
     @validator("size_x", "size_y", "size_z", allow_reuse=True)
     def validate_sizes(cls, v: float) -> float:

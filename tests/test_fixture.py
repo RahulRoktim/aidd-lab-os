@@ -6,7 +6,6 @@ Pure Python / standard library compatible tests for parsing standard multi-pose 
 import sys
 import os
 
-sys.path.insert(0, '/working_dir/c_1ed089c83162bf3c/aidd_lab_os')
 
 from aidd_worker.services.vina_service import parse_vina_log_output, VINA_STANDARD_LOG_FIXTURE
 

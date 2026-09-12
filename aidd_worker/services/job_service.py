@@ -227,7 +227,7 @@ def run_docking_job(request: DockingJobRequest) -> JobResult:
             "search_box": request.search_box.dict(),
             "exhaustiveness": request.exhaustiveness or 16,
             "num_modes": request.num_modes or 9,
-            "seed": request.seed or 42
+            "seed": request.seed if request.seed is not None else 42
         }
     )
     _JOBS_REGISTRY[job_id] = job

@@ -10,6 +10,9 @@ from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.responses import JSONResponse, FileResponse, PlainTextResponse
 from fastapi.middleware.cors import CORSMiddleware
 
+from starlette.concurrency import run_in_threadpool
+from contextlib import asynccontextmanager
+from local_boundary import install_local_boundary
 from aidd_worker import config
 from aidd_worker.models import (
     DescriptorJobRequest, StandardizeJobRequest, DockingJobRequest,
@@ -21,19 +24,19 @@ from aidd_worker.services.rdkit_service import run_50_molecule_validation_suite
 from aidd_worker.services.artifact_service import resolve_job_path
 from aidd_worker.services import job_queue_service
 
-app = FastAPI(
+@asynccontextmanager
+async def lifespan(application):
+    job_queue_service.recover_jobs()
+    yield
+
+
+app = FastAPI(lifespan=lifespan,
     title="AIDD Scientific Worker API",
     description="Dedicated Local Worker for Native Cheminformatics & Molecular Docking Execution",
     version=config.WORKER_VERSION
 )
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+install_local_boundary(app)
 
 # -----------------------------------------------------------------
 # WORKER HEALTH, READINESS & CAPABILITIES
@@ -117,7 +120,7 @@ async def get_environment():
 
 @app.get("/validation/rdkit")
 async def validate_rdkit_benchmark():
-    return run_50_molecule_validation_suite()
+    return await run_in_threadpool(run_50_molecule_validation_suite)
 
 # -----------------------------------------------------------------
 # JOB EXECUTION ENDPOINTS
@@ -127,13 +130,23 @@ async def validate_rdkit_benchmark():
 async def submit_descriptor_job(request: DescriptorJobRequest):
     if not request.molecules:
         raise HTTPException(status_code=400, detail="Molecule list cannot be empty")
-    return job_queue_service.run_descriptor_job(request)
+    try:
+        return await run_in_threadpool(job_queue_service.run_descriptor_job, request)
+    except job_queue_service.QueueCapacityError as error:
+        raise HTTPException(status_code=429, detail=str(error))
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error))
 
 @app.post("/jobs/standardize", response_model=JobResult)
 async def submit_standardize_job(request: StandardizeJobRequest):
     if not request.molecules:
         raise HTTPException(status_code=400, detail="Molecule list cannot be empty")
-    return job_queue_service.run_standardize_job(request)
+    try:
+        return await run_in_threadpool(job_queue_service.run_standardize_job, request)
+    except job_queue_service.QueueCapacityError as error:
+        raise HTTPException(status_code=429, detail=str(error))
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error))
 
 @app.post("/jobs/docking", response_model=JobResult)
 async def submit_docking_job(request: DockingJobRequest):
@@ -141,7 +154,12 @@ async def submit_docking_job(request: DockingJobRequest):
         raise HTTPException(status_code=400, detail="Receptor PDBQT structure is required")
     if not request.ligands:
         raise HTTPException(status_code=400, detail="At least one ligand is required for docking")
-    return job_queue_service.run_docking_job(request)
+    try:
+        return await run_in_threadpool(job_queue_service.run_docking_job, request)
+    except job_queue_service.QueueCapacityError as error:
+        raise HTTPException(status_code=429, detail=str(error))
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error))
 
 @app.get("/jobs", response_model=List[JobResult])
 async def list_jobs():
@@ -169,6 +187,13 @@ async def get_job_artifact(job_id: str, filename: str):
         raise HTTPException(status_code=404, detail="Artifact file not found")
     if not os.path.exists(file_path):
         raise HTTPException(status_code=404, detail="Artifact file not found")
+    job = job_queue_service.get_job(job_id)
+    if not job or job.status != JobStatus.COMPLETED:
+        raise HTTPException(status_code=409, detail='Job artifacts are unpublished; inspect local diagnostic storage')
+    artifact = next((item for item in job.artifacts if item.name == filename), None)
+    from aidd_worker.services.artifact_service import compute_file_sha256
+    if not artifact or compute_file_sha256(file_path) != artifact.sha256_hash:
+        raise HTTPException(status_code=409, detail='Artifact is unattested or its digest changed')
     return FileResponse(file_path)
 
 if __name__ == "__main__":
